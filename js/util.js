@@ -49,3 +49,56 @@ export function escapeHtml(s) {
 export function uid() {
   return (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
 }
+
+// シンプルなCSVパーサー（ダブルクォート囲み・カンマ区切りに対応）。
+export function parseCsv(text) {
+  const rows = [];
+  let row = [];
+  let field = '';
+  let inQuotes = false;
+  const s = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (s[i + 1] === '"') { field += '"'; i++; } else { inQuotes = false; }
+      } else {
+        field += c;
+      }
+    } else if (c === '"') {
+      inQuotes = true;
+    } else if (c === ',') {
+      row.push(field); field = '';
+    } else if (c === '\n') {
+      row.push(field); field = '';
+      rows.push(row); row = [];
+    } else {
+      field += c;
+    }
+  }
+  if (field.length || row.length) { row.push(field); rows.push(row); }
+  return rows.filter(r => r.some(c => c.trim() !== ''));
+}
+
+function csvField(v) {
+  const s = String(v ?? '');
+  if (/[",\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+  return s;
+}
+
+export function toCsv(rows) {
+  const body = rows.map(r => r.map(csvField).join(',')).join('\r\n');
+  return '﻿' + body; // Excel向けにBOM付与
+}
+
+export function downloadCsv(filename, rows) {
+  const blob = new Blob([toCsv(rows)], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}

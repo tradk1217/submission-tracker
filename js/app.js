@@ -1,5 +1,5 @@
-import { DB, getMeta, setMeta } from './db.js';
-import { todayStr, addDays, formatDateJp, formatDateTimeJp, deadlineState, rubyHtml, escapeHtml } from './util.js';
+import { DB, getMeta, setMeta, ALL_STORES } from './db.js';
+import { todayStr, addDays, formatDateJp, formatDateTimeJp, deadlineState, rubyHtml, escapeHtml, parseCsv, downloadCsv } from './util.js';
 
 const STATUS = {
   NOT_SUBMITTED: 'not_submitted',
@@ -12,14 +12,26 @@ const STATUS = {
 };
 
 const STATUS_META = {
-  [STATUS.NOT_SUBMITTED]: { icon: '□', label: 'まだ', cls: 'st-none' },
-  [STATUS.SUBMITTED]: { icon: '○', label: 'だせた', cls: 'st-ok' },
-  [STATUS.IN_PROGRESS]: { icon: '△', label: 'とちゅう', cls: 'st-mid' },
-  [STATUS.FORGOTTEN]: { icon: '×', label: 'わすれた', cls: 'st-bad' },
-  [STATUS.REDO]: { icon: '★', label: 'なおし', cls: 'st-redo' },
-  [STATUS.RESUBMIT_WAIT]: { icon: '→', label: 'かくにん中', cls: 'st-wait' },
-  [STATUS.EXEMPT]: { icon: '–', label: 'めんじょ', cls: 'st-none' },
+  [STATUS.NOT_SUBMITTED]: { icon: '□', label: 'まだ', kana: '', cls: 'st-none' },
+  [STATUS.SUBMITTED]: { icon: '○', label: '出せた', kana: 'だせた', cls: 'st-ok' },
+  [STATUS.IN_PROGRESS]: { icon: '△', label: '途中', kana: 'とちゅう', cls: 'st-mid' },
+  [STATUS.FORGOTTEN]: { icon: '×', label: '忘れた', kana: 'わすれた', cls: 'st-bad' },
+  [STATUS.REDO]: { icon: '★', label: '直し', kana: 'なおし', cls: 'st-redo' },
+  [STATUS.RESUBMIT_WAIT]: { icon: '→', label: '確認中', kana: 'かくにんちゅう', cls: 'st-wait' },
+  [STATUS.EXEMPT]: { icon: '–', label: '免除', kana: 'めんじょ', cls: 'st-none' },
 };
+
+function childLabel(status) {
+  const meta = STATUS_META[status];
+  return rubyHtml(meta.label, meta.kana);
+}
+
+function deadlineBadge(deadline) {
+  const dl = deadlineState(deadline);
+  if (!dl) return '';
+  const cls = { over: 'dl-over', today: 'dl-today', soon: 'dl-soon', ok: 'dl-ok' }[dl.level];
+  return `<span class="dl-badge ${cls}">${dl.label} ${formatDateTimeJp(deadline)}</span>`;
+}
 
 const app = document.getElementById('app');
 
@@ -114,6 +126,26 @@ async function setStatus(studentId, assignmentId, status, actor, plannedDate) {
   return row;
 }
 
+async function deleteStudentCascade(studentId) {
+  const statuses = await DB.getAllByIndex('statuses', 'studentId', studentId);
+  for (const s of statuses) await DB.delete('statuses', s.key);
+  const history = await DB.getAllByIndex('history', 'studentId', studentId);
+  for (const h of history) await DB.delete('history', h.id);
+  await DB.delete('students', studentId);
+}
+
+async function deleteItemCascade(itemId) {
+  const assignments = (await DB.getAll('assignments')).filter(a => a.itemId === itemId);
+  for (const a of assignments) {
+    const statuses = await DB.getAllByIndex('statuses', 'assignmentId', a.id);
+    for (const s of statuses) await DB.delete('statuses', s.key);
+    const history = await DB.getAllByIndex('history', 'assignmentId', a.id);
+    for (const h of history) await DB.delete('history', h.id);
+    await DB.delete('assignments', a.id);
+  }
+  await DB.delete('items', itemId);
+}
+
 // ---------- 児童モード ----------
 
 async function renderChildSelect() {
@@ -123,7 +155,7 @@ async function renderChildSelect() {
   `).join('');
   app.innerHTML = `
     <div class="screen child-select">
-      <h1 class="page-title">しゅっせきばんごうを おしてね</h1>
+      <h1 class="page-title">${rubyHtml('出席番号', 'しゅっせきばんごう')}を ${rubyHtml('押', 'お')}してね</h1>
       <div class="num-grid">${panels || '<p class="empty">児童が登録されていません</p>'}</div>
       <button class="teacher-link" data-action="goTeacherPin">教師用</button>
     </div>
@@ -135,12 +167,12 @@ async function renderChildConfirm() {
   if (!student) { goto('childSelect'); return; }
   app.innerHTML = `
     <div class="screen child-confirm">
-      <p class="confirm-lead">${rubyHtml('この ばんごうで', '')}</p>
-      <div class="confirm-name">${student.number}ばん ${rubyHtml(student.name, student.kana)}</div>
-      <p class="confirm-lead">${rubyHtml('まちがいないですか？', '')}</p>
+      <p class="confirm-lead">${rubyHtml('この 番号で', 'このばんごうで')}</p>
+      <div class="confirm-name">${student.number}${rubyHtml('番', 'ばん')} ${rubyHtml(student.name, student.kana)}</div>
+      <p class="confirm-lead">${rubyHtml('間違いないですか？', 'まちがいないですか')}</p>
       <div class="confirm-buttons">
         <button class="big-btn yes" data-action="confirmStudent">${rubyHtml('はい', '')}</button>
-        <button class="big-btn no" data-action="cancelStudent">${rubyHtml('ちがう', '')}</button>
+        <button class="big-btn no" data-action="cancelStudent">${rubyHtml('違う', 'ちがう')}</button>
       </div>
     </div>
   `;
@@ -184,16 +216,16 @@ async function renderChildPage() {
     return `<li class="item-row ${meta.cls}" ${clickable ? `data-action="openItemSheet" data-assignment="${a.id}"` : `data-action="alreadyDone"`}>
       <span class="item-icon">${meta.icon}</span>
       <span class="item-name">${rubyHtml(a.item.name, a.item.kana)}</span>
-      <span class="item-status">${meta.label}</span>
+      <span class="item-status">${childLabel(st.status)}</span>
     </li>`;
-  }).join('') : '<li class="empty-row">今日はありません</li>';
+  }).join('') : '<li class="empty-row">' + rubyHtml('今日はありません', 'きょうはありません') + '</li>';
 
   const redoHtml = redoRows.length ? redoRows.map(({ a, st }) => {
     const waiting = st.status === STATUS.RESUBMIT_WAIT;
     return `<li class="item-row ${waiting ? 'st-wait' : 'st-redo'}" data-action="${waiting ? 'redoInfo' : 'openRedoSheet'}" data-assignment="${a.id}">
       <span class="item-icon">${waiting ? '→' : '★'}</span>
       <span class="item-name">${rubyHtml(a.item.name, a.item.kana)}</span>
-      <span class="item-status">${waiting ? 'かくにん中' : 'なおしてね'}</span>
+      <span class="item-status">${waiting ? childLabel(STATUS.RESUBMIT_WAIT) : rubyHtml('直してね', 'なおしてね')}</span>
     </li>`;
   }).join('') : '<li class="empty-row">ありません</li>';
 
@@ -206,30 +238,30 @@ async function renderChildPage() {
 
   app.innerHTML = `
     <div class="screen child-page">
-      <div class="child-header">${student.number}ばん ${rubyHtml(student.name, student.kana)}さん</div>
+      <div class="child-header">${student.number}${rubyHtml('番', 'ばん')} ${rubyHtml(student.name, student.kana)}${rubyHtml('さん', '')}</div>
 
       <section class="card">
-        <h2>${rubyHtml('いま出すもの', 'いまだすもの')}</h2>
+        <h2>${rubyHtml('今出すもの', 'いまだすもの')}</h2>
         <ul class="item-list">${todayHtml}</ul>
       </section>
 
       <section class="card">
-        <h2>なおすもの</h2>
+        <h2>${rubyHtml('直すもの', 'なおすもの')}</h2>
         <ul class="item-list">${redoHtml}</ul>
       </section>
 
       <section class="card">
-        <h2>${rubyHtml('あとで出すもの', 'あとでだすもの')}</h2>
+        <h2>${rubyHtml('後で出すもの', 'あとでだすもの')}</h2>
         <ul class="item-list">${laterHtml}</ul>
       </section>
 
       <section class="card small">
-        <h2>これまでのようす</h2>
-        <p>${rubyHtml('出せた', 'だせた')}　${submittedCount}回</p>
-        <p>わすれた　${forgottenAssignments.size}回</p>
+        <h2>${rubyHtml('これまでの様子', 'これまでのようす')}</h2>
+        <p>${rubyHtml('出せた', 'だせた')}　${submittedCount}${rubyHtml('回', 'かい')}</p>
+        <p>${rubyHtml('忘れた', 'わすれた')}　${forgottenAssignments.size}${rubyHtml('回', 'かい')}</p>
       </section>
 
-      <button class="finish-btn" data-action="finishChild">${rubyHtml('おわったら ここをおす', '')}</button>
+      <button class="finish-btn" data-action="finishChild">${rubyHtml('終わったら ここを押す', 'おわったら ここをおす')}</button>
     </div>
   `;
   resetInactivityTimer();
@@ -253,10 +285,10 @@ function openItemSheet(assignmentId) {
   renderModal(`
     <h3>${rubyHtml('どうする？', '')}</h3>
     <div class="sheet-buttons">
-      <button class="big-btn yes" data-action="setChildStatus" data-status="${STATUS.SUBMITTED}" data-assignment="${assignmentId}">${rubyHtml('だせた', '')}</button>
-      <button class="big-btn" data-action="setChildStatus" data-status="${STATUS.IN_PROGRESS}" data-assignment="${assignmentId}">${rubyHtml('とちゅう', '')}</button>
-      <button class="big-btn" data-action="setChildStatus" data-status="${STATUS.FORGOTTEN}" data-assignment="${assignmentId}">${rubyHtml('わすれた', '')}</button>
-      <button class="big-btn plan" data-action="openPlanSheet" data-assignment="${assignmentId}">${rubyHtml('よていびをきめる', '')}</button>
+      <button class="big-btn yes" data-action="setChildStatus" data-status="${STATUS.SUBMITTED}" data-assignment="${assignmentId}">${rubyHtml('出せた', 'だせた')}</button>
+      <button class="big-btn" data-action="setChildStatus" data-status="${STATUS.IN_PROGRESS}" data-assignment="${assignmentId}">${rubyHtml('途中', 'とちゅう')}</button>
+      <button class="big-btn" data-action="setChildStatus" data-status="${STATUS.FORGOTTEN}" data-assignment="${assignmentId}">${rubyHtml('忘れた', 'わすれた')}</button>
+      <button class="big-btn plan" data-action="openPlanSheet" data-assignment="${assignmentId}">${rubyHtml('予定日を決める', 'よていびをきめる')}</button>
       <button class="big-btn cancel" data-action="closeModal">${rubyHtml('やめる', '')}</button>
     </div>
   `);
@@ -267,9 +299,9 @@ function openPlanSheet(assignmentId) {
   renderModal(`
     <h3>${rubyHtml('いつ出す？', '')}</h3>
     <div class="sheet-buttons">
-      <button class="big-btn" data-action="setPlan" data-days="1" data-assignment="${assignmentId}">${rubyHtml('あした', '')}</button>
-      <button class="big-btn" data-action="setPlan" data-days="2" data-assignment="${assignmentId}">${rubyHtml('あさって', '')}</button>
-      <button class="big-btn" data-action="setPlan" data-days="3" data-assignment="${assignmentId}">3日後</button>
+      <button class="big-btn" data-action="setPlan" data-days="1" data-assignment="${assignmentId}">${rubyHtml('明日', 'あした')}</button>
+      <button class="big-btn" data-action="setPlan" data-days="2" data-assignment="${assignmentId}">${rubyHtml('明後日', 'あさって')}</button>
+      <button class="big-btn" data-action="setPlan" data-days="3" data-assignment="${assignmentId}">3${rubyHtml('日後', 'にちご')}</button>
       <button class="big-btn cancel" data-action="closeModal">${rubyHtml('やめる', '')}</button>
     </div>
   `);
@@ -292,9 +324,9 @@ function openDeadlineSheet(itemId) {
 
 function openRedoSheet(assignmentId) {
   renderModal(`
-    <h3>${rubyHtml('なおして出す？', '')}</h3>
+    <h3>${rubyHtml('直して出す？', 'なおしてだす')}</h3>
     <div class="sheet-buttons">
-      <button class="big-btn yes" data-action="resubmit" data-assignment="${assignmentId}">${rubyHtml('なおして出した', '')}</button>
+      <button class="big-btn yes" data-action="resubmit" data-assignment="${assignmentId}">${rubyHtml('直して出した', 'なおしてだした')}</button>
       <button class="big-btn cancel" data-action="closeModal">${rubyHtml('やめる', '')}</button>
     </div>
   `);
@@ -348,6 +380,7 @@ async function renderTeacherHome() {
 
   const allAssignments = await getAllAssignmentsWithItems();
   const redoByStudent = new Map();
+  let submittedTotal = 0, targetTotal = 0;
   for (const a of allAssignments) {
     if (!a.item) continue;
     for (const s of students) {
@@ -357,14 +390,19 @@ async function renderTeacherHome() {
         if (!redoByStudent.has(s.id)) redoByStudent.set(s.id, { student: s, items: [] });
         redoByStudent.get(s.id).items.push({ a, st });
       }
+      if (st.status !== STATUS.EXEMPT) {
+        targetTotal++;
+        if (st.status === STATUS.SUBMITTED) submittedTotal++;
+      }
     }
   }
+  const overallRate = targetTotal > 0 ? Math.round((submittedTotal / targetTotal) * 100) : null;
 
   const unsubmittedHtml = [...unsubmittedByStudent.values()].map(({ student, items }) => `
     <li class="t-row" data-action="openStudentQuick" data-id="${student.id}">
       <span class="t-num">${student.number}番</span>
       <span class="t-name">${escapeHtml(student.name)}</span>
-      <span class="t-items">${items.map(i => escapeHtml(i.a.item.name)).join('・')}</span>
+      <span class="t-items">${items.map(i => escapeHtml(i.a.item.name) + (i.dl ? deadlineBadge(i.a.deadline) : '')).join('・')}</span>
     </li>`).join('') || '<li class="empty-row">未提出はありません</li>';
 
   const redoHtml = [...redoByStudent.values()].map(({ student, items }) => `
@@ -383,6 +421,7 @@ async function renderTeacherHome() {
         <div class="sum-card warn">未提出 ${unsubmittedCount}件</div>
         <div class="sum-card redo">直し ${redoCount}件</div>
         <div class="sum-card over">期限超過 ${overCount}件</div>
+        <div class="sum-card">学級の提出率 ${overallRate === null ? '－' : overallRate + '%'}</div>
       </div>
       <section class="card">
         <h2>未提出一覧</h2>
@@ -416,7 +455,9 @@ async function renderTeacherStudents() {
     <li class="t-row">
       <span class="t-num">${s.number}番</span>
       <span class="t-name">${escapeHtml(s.name)}${s.active === false ? '（停止中）' : ''}</span>
+      <button class="mini-btn" data-action="openStudentDetail" data-id="${s.id}">詳細</button>
       <button class="mini-btn" data-action="toggleStudentActive" data-id="${s.id}">${s.active === false ? '復帰' : '停止'}</button>
+      <button class="mini-btn danger" data-action="deleteStudent" data-id="${s.id}" data-name="${escapeHtml(s.name)}">削除</button>
     </li>`).join('') || '<li class="empty-row">未登録</li>';
 
   app.innerHTML = `
@@ -433,6 +474,14 @@ async function renderTeacherStudents() {
           <button type="submit" class="mini-btn primary">追加</button>
         </form>
       </section>
+      <section class="card">
+        <h2>CSVで一括登録</h2>
+        <p style="color:#666;font-size:0.9rem;">1行目は見出し、2行目以降に「出席番号,氏名,ふりがな」の順で入力してください（ふりがなは省略可）。</p>
+        <label class="mini-btn" style="display:inline-block;cursor:pointer;">
+          CSVファイルを選ぶ
+          <input type="file" id="studentCsvFile" accept=".csv,text/csv" style="display:none;">
+        </label>
+      </section>
     </div>
   `;
   document.getElementById('addStudentForm').addEventListener('submit', async (e) => {
@@ -445,16 +494,56 @@ async function renderTeacherStudents() {
     await DB.add('students', { number, name, kana, active: true });
     renderTeacherStudents();
   });
+  document.getElementById('studentCsvFile').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const rows = parseCsv(text).slice(1);
+      let count = 0;
+      for (const r of rows) {
+        const number = Number(r[0]);
+        const name = (r[1] || '').trim();
+        const kana = (r[2] || '').trim();
+        if (!name || !Number.isFinite(number)) continue;
+        await DB.add('students', { number, name, kana, active: true });
+        count++;
+      }
+      showToast(`${count}件 取り込みました`);
+      renderTeacherStudents();
+    } catch (err) {
+      alert('CSVの読み込みに失敗しました: ' + (err && err.message ? err.message : String(err)));
+    }
+  });
 }
 
 async function renderTeacherItems() {
   const items = await DB.getAll('items');
-  const rows = items.map(i => `
+  const students = await getActiveStudents();
+  const assignments = await DB.getAll('assignments');
+  const rowsArr = [];
+  for (const i of items) {
+    const itemAssignments = assignments.filter(a => a.itemId === i.id);
+    let submitted = 0, target = 0;
+    for (const a of itemAssignments) {
+      for (const s of students) {
+        const st = await getStatus(s.id, a.id);
+        if (st.status !== STATUS.EXEMPT) {
+          target++;
+          if (st.status === STATUS.SUBMITTED) submitted++;
+        }
+      }
+    }
+    const rate = target > 0 ? Math.round((submitted / target) * 100) : null;
+    rowsArr.push(`
     <li class="t-row">
       <span class="t-name">${escapeHtml(i.name)}${i.active === false ? '（停止中）' : ''}</span>
-      <span class="t-items">${i.hasDeadline ? '期限あり' : ''}</span>
+      <span class="t-items">${i.hasDeadline ? '期限あり　' : ''}提出率 ${rate === null ? '－' : rate + '%'}</span>
       <button class="mini-btn" data-action="toggleItemActive" data-id="${i.id}">${i.active === false ? '復帰' : '停止'}</button>
-    </li>`).join('') || '<li class="empty-row">未登録</li>';
+      <button class="mini-btn danger" data-action="deleteItem" data-id="${i.id}" data-name="${escapeHtml(i.name)}">削除</button>
+    </li>`);
+  }
+  const rows = rowsArr.join('') || '<li class="empty-row">未登録</li>';
 
   app.innerHTML = `
     <div class="screen teacher-page">
@@ -470,6 +559,14 @@ async function renderTeacherItems() {
           <button type="submit" class="mini-btn primary">追加</button>
         </form>
       </section>
+      <section class="card">
+        <h2>CSVで一括登録</h2>
+        <p style="color:#666;font-size:0.9rem;">1行目は見出し、2行目以降に「提出物名,ふりがな,期限あり(1か0)」の順で入力してください（ふりがな・期限は省略可）。</p>
+        <label class="mini-btn" style="display:inline-block;cursor:pointer;">
+          CSVファイルを選ぶ
+          <input type="file" id="itemCsvFile" accept=".csv,text/csv" style="display:none;">
+        </label>
+      </section>
     </div>
   `;
   document.getElementById('addItemForm').addEventListener('submit', async (e) => {
@@ -481,6 +578,27 @@ async function renderTeacherItems() {
     if (!name) return;
     await DB.add('items', { name, kana, hasDeadline, subject: '', memo: '', active: true });
     renderTeacherItems();
+  });
+  document.getElementById('itemCsvFile').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const rows = parseCsv(text).slice(1);
+      let count = 0;
+      for (const r of rows) {
+        const name = (r[0] || '').trim();
+        const kana = (r[1] || '').trim();
+        const hasDeadline = (r[2] || '').trim() === '1';
+        if (!name) continue;
+        await DB.add('items', { name, kana, hasDeadline, subject: '', memo: '', active: true });
+        count++;
+      }
+      showToast(`${count}件 取り込みました`);
+      renderTeacherItems();
+    } catch (err) {
+      alert('CSVの読み込みに失敗しました: ' + (err && err.message ? err.message : String(err)));
+    }
   });
 }
 
@@ -519,6 +637,30 @@ async function renderTeacherSettings() {
           <button type="submit" class="mini-btn primary">変更</button>
         </form>
       </section>
+      <section class="card">
+        <h2>バックアップ（他の端末に移す）</h2>
+        <p style="color:#666;font-size:0.9rem;">データは各端末に個別に保存されています。他の端末（iPhoneなど）でも同じ内容を見られるようにするには、この端末で書き出したファイルを、もう一方の端末で読み込んでください。児童の氏名を含みます。読み込むと今の端末のデータは上書きされます。</p>
+        <button class="mini-btn primary" id="exportBtn">バックアップを書き出す</button>
+        <div style="margin-top:10px;">
+          <label class="mini-btn" style="display:inline-block;cursor:pointer;">
+            バックアップを読み込む
+            <input type="file" id="importFile" accept="application/json" style="display:none;">
+          </label>
+        </div>
+      </section>
+      <section class="card">
+        <h2>CSV出力（パソコンで確認）</h2>
+        <p style="color:#666;font-size:0.9rem;">Excel等で開ける形式で書き出します。児童の氏名を含みます。</p>
+        <button class="mini-btn" id="exportHistoryCsvBtn">すべての提出履歴をCSVで出力</button>
+        <div style="margin-top:8px;">
+          <button class="mini-btn" id="exportTodayCsvBtn">今日の状況をCSVで出力</button>
+        </div>
+      </section>
+      <section class="card">
+        <h2>年度更新</h2>
+        <p style="color:#666;font-size:0.9rem;">新しい年度・学級を始めるときに使います。必ず先にバックアップを書き出して保存してから行ってください。実行すると、名簿・提出物・提出記録がすべて消え、まっさらな状態から登録し直せます（バックアップファイルを開けば、過去の年度の記録はいつでも見返せます）。</p>
+        <button class="mini-btn danger" id="resetYearBtn">今のデータを消して新しい年度を始める</button>
+      </section>
     </div>
   `;
   document.getElementById('pinForm').addEventListener('submit', async (e) => {
@@ -529,6 +671,106 @@ async function renderTeacherSettings() {
     await setMeta('pin', pin);
     showToast('PINを変更しました');
   });
+  document.getElementById('exportBtn').addEventListener('click', exportBackup);
+  document.getElementById('importFile').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (!confirm('今のこの端末のデータはすべて、読み込むファイルの内容で上書きされます。よろしいですか？')) {
+      e.target.value = '';
+      return;
+    }
+    try {
+      await importBackup(file);
+      showToast('読み込みました');
+      renderTeacherSettings();
+    } catch (err) {
+      alert('読み込みに失敗しました: ' + (err && err.message ? err.message : String(err)));
+    }
+  });
+  document.getElementById('exportHistoryCsvBtn').addEventListener('click', exportHistoryCsv);
+  document.getElementById('exportTodayCsvBtn').addEventListener('click', exportTodayMatrixCsv);
+  document.getElementById('resetYearBtn').addEventListener('click', async () => {
+    if (!confirm('バックアップは書き出し済みですか？\nこの操作を行うと、今の名簿・提出物・提出記録がすべて消えます。元には戻せません。よろしいですか？')) return;
+    if (!confirm('本当によろしいですか？もう一度確認します。')) return;
+    for (const store of ['students', 'items', 'assignments', 'statuses', 'history']) {
+      await DB.clear(store);
+    }
+    showToast('新しい年度を開始しました');
+    renderTeacherStudents();
+  });
+}
+
+async function exportHistoryCsv() {
+  const students = Object.fromEntries((await DB.getAll('students')).map(s => [s.id, s]));
+  const assignments = Object.fromEntries((await DB.getAll('assignments')).map(a => [a.id, a]));
+  const items = Object.fromEntries((await DB.getAll('items')).map(i => [i.id, i]));
+  const history = (await DB.getAll('history')).sort((a, b) => new Date(a.at) - new Date(b.at));
+
+  const rows = [['日時', '出席番号', '氏名', '提出物', '状態', '登録者']];
+  for (const h of history) {
+    const s = students[h.studentId];
+    const a = assignments[h.assignmentId];
+    const i = a ? items[a.itemId] : null;
+    rows.push([
+      formatDateTimeJp(h.at),
+      s ? s.number : '',
+      s ? s.name : '(削除済み)',
+      i ? i.name : '(削除済み)',
+      STATUS_META[h.status] ? STATUS_META[h.status].label : h.status,
+      h.actor === 'teacher' ? '先生' : '児童',
+    ]);
+  }
+  downloadCsv(`提出履歴_${todayStr()}.csv`, rows);
+}
+
+async function exportTodayMatrixCsv() {
+  const students = await getActiveStudents();
+  const todayList = await getTodayAssignments();
+  const validAssignments = todayList.filter(a => a.item);
+
+  const header = ['出席番号', '氏名', ...validAssignments.map(a => a.item.name)];
+  const rows = [header];
+  for (const s of students) {
+    const row = [s.number, s.name];
+    for (const a of validAssignments) {
+      const st = await getStatus(s.id, a.id);
+      row.push(STATUS_META[st.status].icon);
+    }
+    rows.push(row);
+  }
+  downloadCsv(`今日の提出状況_${todayStr()}.csv`, rows);
+}
+
+async function exportBackup() {
+  const data = {};
+  for (const store of ALL_STORES) {
+    data[store] = await DB.getAll(store);
+  }
+  const payload = { app: 'submission-tracker', version: 1, exportedAt: new Date().toISOString(), data };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `submission-tracker-backup-${todayStr()}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+async function importBackup(file) {
+  const text = await file.text();
+  const payload = JSON.parse(text);
+  if (!payload || payload.app !== 'submission-tracker' || !payload.data) {
+    throw new Error('このアプリのバックアップファイルではありません');
+  }
+  for (const store of ALL_STORES) {
+    await DB.clear(store);
+    const rows = payload.data[store];
+    if (Array.isArray(rows) && rows.length) {
+      await DB.putAll(store, rows);
+    }
+  }
 }
 
 function openStudentQuick(studentId) {
@@ -585,7 +827,7 @@ async function openItemRoster(assignmentId) {
       </div>`);
   }
   renderModal(`
-    <h3>${escapeHtml(item.name)}</h3>
+    <h3>${escapeHtml(item.name)} ${deadlineBadge(assignment.deadline)}</h3>
     ${rowsHtml.join('') || '<p>児童が登録されていません</p>'}
     <button class="big-btn cancel" data-action="closeModalRefreshToday">閉じる</button>
   `);
@@ -615,6 +857,84 @@ async function openRedoQuick(studentId) {
   `);
 }
 
+async function computeStudentStats(studentId) {
+  const allAssignments = await getAllAssignmentsWithItems();
+  const unresolved = [];
+  const redo = [];
+  const planned = [];
+  let submittedCount = 0;
+  let lateCount = 0;
+  const totalCount = allAssignments.filter(a => a.item).length;
+  const forgottenSet = new Set();
+
+  for (const a of allAssignments) {
+    if (!a.item) continue;
+    const st = await getStatus(studentId, a.id);
+    if (st.status === STATUS.SUBMITTED) {
+      submittedCount++;
+      if (a.deadline && st.updatedAt && new Date(st.updatedAt) > new Date(a.deadline)) lateCount++;
+    } else if (st.status === STATUS.REDO || st.status === STATUS.RESUBMIT_WAIT) {
+      redo.push({ a, st });
+    } else if (st.plannedDate) {
+      planned.push({ a, st });
+    } else if (st.status !== STATUS.EXEMPT) {
+      unresolved.push({ a, st });
+    }
+  }
+
+  const history = (await DB.getAllByIndex('history', 'studentId', studentId)).sort((x, y) => new Date(y.at) - new Date(x.at));
+  for (const h of history) if (h.status === STATUS.FORGOTTEN) forgottenSet.add(h.assignmentId);
+
+  const rate = totalCount > 0 ? Math.round((submittedCount / totalCount) * 100) : null;
+  return { unresolved, redo, planned, history, submittedCount, totalCount, lateCount, forgottenCount: forgottenSet.size, rate };
+}
+
+async function openStudentDetail(studentId) {
+  const student = await DB.get('students', studentId);
+  const stats = await computeStudentStats(studentId);
+  const assignmentMap = Object.fromEntries((await getAllAssignmentsWithItems()).map(a => [a.id, a]));
+
+  const rowHtml = ({ a, st }) => `
+    <li class="item-row ${STATUS_META[st.status].cls}">
+      <span class="item-icon">${STATUS_META[st.status].icon}</span>
+      <span class="item-name">${escapeHtml(a.item.name)}</span>
+      <span class="item-status">${STATUS_META[st.status].label}${a.deadline ? deadlineBadge(a.deadline) : ''}</span>
+    </li>`;
+
+  const unresolvedHtml = stats.unresolved.map(rowHtml).join('') || '<li class="empty-row">なし</li>';
+  const redoHtml = stats.redo.map(rowHtml).join('') || '<li class="empty-row">なし</li>';
+  const plannedHtml = stats.planned.map(({ a, st }) => `
+    <li class="item-row st-mid">
+      <span class="item-icon">△</span>
+      <span class="item-name">${escapeHtml(a.item.name)}</span>
+      <span class="item-status">${formatDateJp(st.plannedDate)}まで</span>
+    </li>`).join('') || '<li class="empty-row">なし</li>';
+
+  const historyHtml = stats.history.slice(0, 30).map(h => {
+    const a = assignmentMap[h.assignmentId];
+    const name = a && a.item ? a.item.name : '(削除済み)';
+    return `<li class="t-row"><span class="t-items">${formatDateTimeJp(h.at)}　${escapeHtml(name)}　${STATUS_META[h.status].label}${h.actor === 'teacher' ? '（先生が変更）' : ''}</span></li>`;
+  }).join('') || '<li class="empty-row">履歴なし</li>';
+
+  renderModal(`
+    <h3>${student.number}番 ${escapeHtml(student.name)}さん</h3>
+    <div style="text-align:left;max-height:65vh;overflow-y:auto;">
+      <h4>現在の未提出</h4>
+      <ul class="item-list">${unresolvedHtml}</ul>
+      <h4>直し・再提出待ち</h4>
+      <ul class="item-list">${redoHtml}</ul>
+      <h4>提出予定</h4>
+      <ul class="item-list">${plannedHtml}</ul>
+      <h4>提出率</h4>
+      <p>${stats.rate === null ? '対象なし' : `${stats.rate}%（${stats.submittedCount}/${stats.totalCount}）`}</p>
+      <p>忘れ ${stats.forgottenCount}回　遅れ ${stats.lateCount}回</p>
+      <h4>履歴（新しい順・最大30件）</h4>
+      <ul class="t-list">${historyHtml}</ul>
+    </div>
+    <button class="big-btn cancel" data-action="closeModal">閉じる</button>
+  `);
+}
+
 // ---------- イベント処理 ----------
 
 async function handleAction(action, ds) {
@@ -634,10 +954,10 @@ async function handleAction(action, ds) {
       goto('childSelect');
       return;
     case 'alreadyDone':
-      showToast('もうだしたよ！取り消しは先生に言ってね');
+      showToast('もう出したよ！取り消しは先生に言ってね');
       return;
     case 'redoInfo':
-      showToast('せんせいの確認を待っているよ');
+      showToast('先生の確認を待っているよ');
       return;
     case 'openItemSheet':
       openItemSheet(Number(ds.assignment));
@@ -666,7 +986,7 @@ async function handleAction(action, ds) {
       const status = cur.status === STATUS.NOT_SUBMITTED ? STATUS.IN_PROGRESS : cur.status;
       await setStatus(state.studentId, Number(ds.assignment), status, 'child', plannedDate);
       closeModal();
-      showToast('よていをしらせたよ');
+      showToast('予定を知らせたよ');
       renderChildPage();
       resetInactivityTimer();
       return;
@@ -718,6 +1038,9 @@ async function handleAction(action, ds) {
     case 'openRedoQuick':
       openRedoQuick(Number(ds.id));
       return;
+    case 'openStudentDetail':
+      openStudentDetail(Number(ds.id));
+      return;
     case 'openItemRoster':
       openItemRoster(Number(ds.assignment));
       return;
@@ -750,6 +1073,20 @@ async function handleAction(action, ds) {
       const it = await DB.get('items', Number(ds.id));
       it.active = it.active === false ? true : false;
       await DB.put('items', it);
+      renderTeacherItems();
+      return;
+    }
+    case 'deleteStudent': {
+      if (!confirm(`${ds.name}さんを削除します。提出履歴もすべて削除され、元に戻せません。よろしいですか？`)) return;
+      await deleteStudentCascade(Number(ds.id));
+      showToast('削除しました');
+      renderTeacherStudents();
+      return;
+    }
+    case 'deleteItem': {
+      if (!confirm(`「${ds.name}」を削除します。関連する提出履歴もすべて削除され、元に戻せません。よろしいですか？`)) return;
+      await deleteItemCascade(Number(ds.id));
+      showToast('削除しました');
       renderTeacherItems();
       return;
     }

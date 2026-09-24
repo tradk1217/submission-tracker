@@ -80,7 +80,18 @@ export const DB = {
   async getAllByIndex(store, indexName, value) {
     return tx([store], 'readonly', t => reqToPromise(t.objectStore(store).index(indexName).getAll(value)));
   },
+  async clear(store) {
+    return tx([store], 'readwrite', t => reqToPromise(t.objectStore(store).clear()));
+  },
+  async putAll(store, values) {
+    return tx([store], 'readwrite', t => {
+      const os = t.objectStore(store);
+      values.forEach(v => os.put(v));
+    });
+  },
 };
+
+export const ALL_STORES = ['students', 'items', 'assignments', 'statuses', 'history', 'meta'];
 
 export async function getMeta(key, fallback) {
   const row = await DB.get('meta', key);
