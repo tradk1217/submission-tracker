@@ -1,4 +1,4 @@
-const CACHE_NAME = 'submission-tracker-v3';
+const CACHE_NAME = 'submission-tracker-v4';
 const ASSETS = [
   './',
   './index.html',
@@ -25,16 +25,14 @@ self.addEventListener('activate', (event) => {
   );
 });
 
+// オンライン時は常に最新を取得し、取れない時だけキャッシュを使う（ネット優先）。
 self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
   event.respondWith(
-    caches.match(event.request).then(cached => {
-      if (cached) return cached;
-      return fetch(event.request).then(res => {
-        const copy = res.clone();
-        caches.open(CACHE_NAME).then(cache => cache.put(event.request, copy));
-        return res;
-      }).catch(() => cached);
-    })
+    fetch(event.request).then(res => {
+      const copy = res.clone();
+      caches.open(CACHE_NAME).then(cache => cache.put(event.request, copy));
+      return res;
+    }).catch(() => caches.match(event.request))
   );
 });
