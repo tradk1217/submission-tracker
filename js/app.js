@@ -317,6 +317,7 @@ async function renderTeacherPin() {
     </div>
   `;
   state.pinInput = '';
+  updatePinDisplay();
 }
 
 function updatePinDisplay() {
