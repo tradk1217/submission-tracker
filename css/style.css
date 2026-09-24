@@ -1,0 +1,290 @@
+:root {
+  --ok: #1a7f37;
+  --mid: #b98900;
+  --bad: #cf222e;
+  --redo: #8250df;
+  --wait: #0969da;
+  --bg: #f6f7f9;
+  --card: #ffffff;
+  --text: #1f2328;
+  --muted: #6b7280;
+  --border: #e3e6ea;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Hiragino Maru Gothic ProN", "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;
+  user-select: none;
+}
+
+#app {
+  min-height: 100vh;
+  min-height: 100dvh;
+  padding: 16px;
+  padding-bottom: 100px;
+}
+
+.screen { max-width: 900px; margin: 0 auto; }
+
+.page-title { font-size: 1.6rem; text-align: center; margin: 8px 0 20px; }
+
+/* ---- 出席番号パネル ---- */
+.num-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(90px, 1fr));
+  gap: 14px;
+}
+.num-btn {
+  font-size: 2.2rem;
+  font-weight: bold;
+  padding: 22px 0;
+  border-radius: 16px;
+  border: none;
+  background: #2b6cb0;
+  color: white;
+  box-shadow: 0 3px 0 #1a4d80;
+}
+.num-btn:active { transform: translateY(2px); box-shadow: none; }
+
+.teacher-link {
+  display: block;
+  margin: 32px auto 0;
+  padding: 8px 16px;
+  font-size: 0.9rem;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--muted);
+}
+
+/* ---- 児童確認画面 ---- */
+.child-confirm { text-align: center; padding-top: 10vh; }
+.confirm-lead { font-size: 1.5rem; }
+.confirm-name { font-size: 2.6rem; font-weight: bold; margin: 24px 0; }
+.confirm-buttons { display: flex; gap: 20px; justify-content: center; margin-top: 30px; }
+
+/* ---- 汎用ボタン ---- */
+.big-btn {
+  font-size: 1.5rem;
+  padding: 22px 30px;
+  border-radius: 16px;
+  border: none;
+  background: #2b6cb0;
+  color: white;
+  min-width: 160px;
+}
+.big-btn.yes { background: var(--ok); }
+.big-btn.no, .big-btn.cancel { background: #8a8f98; }
+.big-btn.plan { background: var(--mid); }
+.big-btn:active { transform: translateY(2px); }
+
+/* ---- 児童ページ ---- */
+.child-header { font-size: 1.6rem; font-weight: bold; text-align: center; margin-bottom: 16px; }
+
+.card {
+  background: var(--card);
+  border-radius: 16px;
+  padding: 16px;
+  margin-bottom: 16px;
+  border: 1px solid var(--border);
+}
+.card h2 { margin: 0 0 10px; font-size: 1.2rem; }
+.card.small { padding: 12px 16px; }
+.card.small p { margin: 4px 0; font-size: 1.1rem; }
+
+.item-list { list-style: none; margin: 0; padding: 0; }
+.item-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 10px;
+  border-radius: 12px;
+  margin-bottom: 8px;
+  font-size: 1.25rem;
+  background: #f1f3f5;
+}
+.item-icon { font-size: 1.6rem; width: 34px; text-align: center; }
+.item-name { flex: 1; }
+.item-status { font-size: 0.95rem; color: var(--muted); }
+
+.st-ok { background: #e6f4ea; }
+.st-ok .item-icon { color: var(--ok); }
+.st-mid { background: #fff6e0; }
+.st-mid .item-icon { color: var(--mid); }
+.st-bad { background: #fde8e8; }
+.st-bad .item-icon { color: var(--bad); }
+.st-redo { background: #f1e9fd; }
+.st-redo .item-icon { color: var(--redo); }
+.st-wait { background: #e6f0fd; }
+.st-wait .item-icon { color: var(--wait); }
+.st-none { background: #f1f3f5; }
+
+.empty-row { color: var(--muted); padding: 8px; font-size: 1rem; }
+
+.finish-btn {
+  position: fixed;
+  left: 16px;
+  right: 16px;
+  bottom: 16px;
+  max-width: 868px;
+  margin: 0 auto;
+  padding: 20px;
+  font-size: 1.4rem;
+  font-weight: bold;
+  border: none;
+  border-radius: 16px;
+  background: var(--ok);
+  color: white;
+}
+
+/* ---- モーダル ---- */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+  padding: 20px;
+}
+.modal-box {
+  background: white;
+  border-radius: 20px;
+  padding: 24px;
+  width: 100%;
+  max-width: 420px;
+  text-align: center;
+}
+.modal-box h3 { font-size: 1.4rem; margin-top: 0; }
+.sheet-buttons { display: flex; flex-direction: column; gap: 12px; margin-top: 16px; }
+.deadline-input {
+  font-size: 1.1rem;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  width: 100%;
+}
+
+/* ---- トースト ---- */
+.toast {
+  position: fixed;
+  top: 24px;
+  left: 50%;
+  transform: translateX(-50%) translateY(-20px);
+  background: #1f2328;
+  color: white;
+  padding: 14px 24px;
+  border-radius: 12px;
+  font-size: 1.1rem;
+  opacity: 0;
+  transition: all 0.25s ease;
+  z-index: 100;
+}
+.toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+/* ---- 教師モード ---- */
+.teacher-pin {
+  text-align: center;
+  min-height: calc(100vh - 32px);
+  min-height: calc(100dvh - 32px);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+}
+.teacher-pin h1 { margin: 0 0 8px; font-size: 1.3rem; }
+.pin-display { font-size: 2rem; letter-spacing: 8px; margin: 8px 0 16px; }
+.keypad {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  max-width: 300px;
+  margin: 0 auto;
+}
+.key-btn {
+  font-size: 1.5rem;
+  padding: 18px 0;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: white;
+}
+
+.teacher-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+.nav-btn {
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: white;
+  font-size: 0.95rem;
+}
+.nav-btn.active { background: #2b6cb0; color: white; border-color: #2b6cb0; }
+.nav-btn.child { margin-left: auto; background: #eef2f7; }
+
+.summary-cards { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 20px; }
+.sum-card {
+  flex: 1;
+  min-width: 120px;
+  background: white;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 16px;
+  font-size: 1.1rem;
+  text-align: center;
+}
+.sum-card.warn { border-color: var(--mid); color: var(--mid); }
+.sum-card.redo { border-color: var(--redo); color: var(--redo); }
+.sum-card.over { border-color: var(--bad); color: var(--bad); }
+
+.t-list { list-style: none; margin: 0; padding: 0; }
+.t-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 1rem;
+}
+.t-num { font-weight: bold; min-width: 50px; }
+.t-name { min-width: 90px; }
+.t-items { color: var(--muted); flex: 1; }
+
+.form-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.form-row input[type=text], .form-row input[type=number] {
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 1rem;
+}
+.mini-btn {
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: white;
+  font-size: 0.9rem;
+}
+.mini-btn.primary { background: #2b6cb0; color: white; border-color: #2b6cb0; }
+.tag-added { color: var(--ok); font-size: 0.9rem; }
+
+.quick-item { text-align: left; margin-bottom: 14px; }
+.quick-item-name { font-weight: bold; margin-bottom: 6px; }
+.quick-item-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+
+.empty { text-align: center; color: var(--muted); }
+
+@media (max-width: 480px) {
+  .num-btn { font-size: 1.8rem; padding: 18px 0; }
+  .confirm-name { font-size: 2rem; }
+}
