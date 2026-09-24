@@ -160,10 +160,13 @@ html, body {
   border-radius: 20px;
   padding: 24px;
   width: 100%;
-  max-width: 420px;
+  max-width: 480px;
+  max-height: 88vh;
+  overflow-y: auto;
   text-align: center;
 }
 .modal-box h3 { font-size: 1.4rem; margin-top: 0; }
+.modal-box h4 { font-size: 1rem; margin: 16px 0 6px; color: var(--muted); }
 .sheet-buttons { display: flex; flex-direction: column; gap: 12px; margin-top: 16px; }
 .deadline-input {
   font-size: 1.1rem;
@@ -253,6 +256,7 @@ html, body {
 .t-row {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
   padding: 12px 10px;
   border-bottom: 1px solid var(--border);
@@ -277,6 +281,20 @@ html, body {
   font-size: 0.9rem;
 }
 .mini-btn.primary { background: #2b6cb0; color: white; border-color: #2b6cb0; }
+.mini-btn.danger { background: #fff5f5; color: var(--bad); border-color: var(--bad); }
+
+.dl-badge {
+  display: inline-block;
+  font-size: 0.8rem;
+  padding: 3px 8px;
+  border-radius: 8px;
+  margin-left: 6px;
+  white-space: nowrap;
+}
+.dl-badge.dl-ok { background: #eef2f7; color: var(--muted); }
+.dl-badge.dl-soon { background: #fff6e0; color: var(--mid); }
+.dl-badge.dl-today { background: #fde8e8; color: var(--bad); }
+.dl-badge.dl-over { background: var(--bad); color: white; }
 .tag-added { color: var(--ok); font-size: 0.9rem; }
 
 .quick-item { text-align: left; margin-bottom: 14px; }
