@@ -50,6 +50,15 @@ export function uid() {
   return (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
 }
 
+// クラウド同期用の匿名コード。出席番号のような推測されやすい連番ではなく、
+// 各端末の名簿に手入力/CSVで揃えて使う、ランダムな識別子。
+export function generateCode() {
+  const chars = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ'; // 紛らわしい文字(0,O,1,I等)を除外
+  let s = '';
+  for (let i = 0; i < 8; i++) s += chars[Math.floor(Math.random() * chars.length)];
+  return s;
+}
+
 // シンプルなCSVパーサー（ダブルクォート囲み・カンマ区切りに対応）。
 export function parseCsv(text) {
   const rows = [];

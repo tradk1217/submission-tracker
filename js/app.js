@@ -1,5 +1,6 @@
 import { DB, getMeta, setMeta, ALL_STORES } from './db.js';
-import { todayStr, addDays, formatDateJp, formatDateTimeJp, deadlineState, rubyHtml, escapeHtml, parseCsv, downloadCsv } from './util.js';
+import { todayStr, addDays, formatDateJp, formatDateTimeJp, deadlineState, rubyHtml, escapeHtml, parseCsv, downloadCsv, generateCode, uid } from './util.js';
+import * as Sync from './sync.js';
 
 const STATUS = {
   NOT_SUBMITTED: 'not_submitted',
@@ -47,6 +48,14 @@ const state = {
 async function ensureBootstrap() {
   const pin = await getMeta('pin', null);
   if (pin === null) await setMeta('pin', '0000');
+  // 既存データ（コード未設定の児童）への後方互換
+  const students = await DB.getAll('students');
+  for (const s of students) {
+    if (!s.code) {
+      s.code = generateCode();
+      await DB.put('students', s);
+    }
+  }
 }
 
 function goto(screen, extra = {}) {
@@ -122,28 +131,54 @@ async function setStatus(studentId, assignmentId, status, actor, plannedDate) {
     updatedBy: actor,
   };
   await DB.put('statuses', row);
-  await DB.add('history', { studentId, assignmentId, status, actor, at: row.updatedAt });
+  const historyId = await DB.add('history', { studentId, assignmentId, status, actor, at: row.updatedAt });
+  Sync.pushStatus(row);
+  Sync.pushHistory({ id: historyId, studentId, assignmentId, status, actor, at: row.updatedAt });
   return row;
 }
 
 async function deleteStudentCascade(studentId) {
   const statuses = await DB.getAllByIndex('statuses', 'studentId', studentId);
-  for (const s of statuses) await DB.delete('statuses', s.key);
+  for (const s of statuses) {
+    await DB.delete('statuses', s.key);
+    Sync.deleteStatusRemote(studentId, s.assignmentId);
+  }
   const history = await DB.getAllByIndex('history', 'studentId', studentId);
   for (const h of history) await DB.delete('history', h.id);
   await DB.delete('students', studentId);
 }
 
+async function addItemLocal(data) {
+  const syncId = uid();
+  const id = await DB.add('items', { ...data, syncId });
+  Sync.pushItem({ ...data, id, syncId });
+  return id;
+}
+
+async function addAssignmentLocal(data) {
+  const syncId = uid();
+  const id = await DB.add('assignments', { ...data, syncId });
+  const item = await DB.get('items', data.itemId);
+  Sync.pushAssignment({ ...data, id, syncId }, item ? item.syncId : null);
+  return id;
+}
+
 async function deleteItemCascade(itemId) {
+  const item = await DB.get('items', itemId);
   const assignments = (await DB.getAll('assignments')).filter(a => a.itemId === itemId);
   for (const a of assignments) {
     const statuses = await DB.getAllByIndex('statuses', 'assignmentId', a.id);
-    for (const s of statuses) await DB.delete('statuses', s.key);
+    for (const s of statuses) {
+      await DB.delete('statuses', s.key);
+      Sync.deleteStatusRemote(s.studentId, a.id);
+    }
     const history = await DB.getAllByIndex('history', 'assignmentId', a.id);
     for (const h of history) await DB.delete('history', h.id);
     await DB.delete('assignments', a.id);
+    Sync.deleteAssignmentRemote(a);
   }
   await DB.delete('items', itemId);
+  Sync.deleteItemRemote(item);
 }
 
 // ---------- 児童モード ----------
@@ -455,6 +490,7 @@ async function renderTeacherStudents() {
     <li class="t-row">
       <span class="t-num">${s.number}番</span>
       <span class="t-name">${escapeHtml(s.name)}${s.active === false ? '（停止中）' : ''}</span>
+      <span class="t-items" style="font-family:monospace;">${s.code || '－'}</span>
       <button class="mini-btn" data-action="openStudentDetail" data-id="${s.id}">詳細</button>
       <button class="mini-btn" data-action="toggleStudentActive" data-id="${s.id}">${s.active === false ? '復帰' : '停止'}</button>
       <button class="mini-btn danger" data-action="deleteStudent" data-id="${s.id}" data-name="${escapeHtml(s.name)}">削除</button>
@@ -482,6 +518,17 @@ async function renderTeacherStudents() {
           <input type="file" id="studentCsvFile" accept=".csv,text/csv" style="display:none;">
         </label>
       </section>
+      <section class="card">
+        <h2>他の端末に名簿を揃える</h2>
+        <p style="color:#666;font-size:0.9rem;">この端末の名簿（氏名＋コード）をCSVで書き出し、他の端末（iPhoneなど）で読み込むと、同じ児童に同じコードが割り当てられます。クラウド同期はこのコードを使って行うため、全端末でコードを揃えてください。このファイルには氏名が含まれるので、他人に渡さないでください。</p>
+        <button class="mini-btn" id="exportStudentCodeCsvBtn">名簿（コード付き）を書き出す</button>
+        <div style="margin-top:8px;">
+          <label class="mini-btn" style="display:inline-block;cursor:pointer;">
+            名簿（コード付き）を読み込む
+            <input type="file" id="studentCodeCsvFile" accept=".csv,text/csv" style="display:none;">
+          </label>
+        </div>
+      </section>
     </div>
   `;
   document.getElementById('addStudentForm').addEventListener('submit', async (e) => {
@@ -491,7 +538,7 @@ async function renderTeacherStudents() {
     const name = String(fd.get('name')).trim();
     const kana = String(fd.get('kana') || '').trim();
     if (!name) return;
-    await DB.add('students', { number, name, kana, active: true });
+    await DB.add('students', { number, name, kana, code: generateCode(), active: true });
     renderTeacherStudents();
   });
   document.getElementById('studentCsvFile').addEventListener('change', async (e) => {
@@ -506,7 +553,35 @@ async function renderTeacherStudents() {
         const name = (r[1] || '').trim();
         const kana = (r[2] || '').trim();
         if (!name || !Number.isFinite(number)) continue;
-        await DB.add('students', { number, name, kana, active: true });
+        await DB.add('students', { number, name, kana, code: generateCode(), active: true });
+        count++;
+      }
+      showToast(`${count}件 取り込みました`);
+      renderTeacherStudents();
+    } catch (err) {
+      alert('CSVの読み込みに失敗しました: ' + (err && err.message ? err.message : String(err)));
+    }
+  });
+  document.getElementById('exportStudentCodeCsvBtn').addEventListener('click', async () => {
+    const list = (await DB.getAll('students')).sort((a, b) => a.number - b.number);
+    const rows = [['出席番号', '氏名', 'ふりがな', 'コード']];
+    for (const s of list) rows.push([s.number, s.name, s.kana || '', s.code || '']);
+    downloadCsv(`名簿コード付き_${todayStr()}.csv`, rows);
+  });
+  document.getElementById('studentCodeCsvFile').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const rows = parseCsv(text).slice(1);
+      let count = 0;
+      for (const r of rows) {
+        const number = Number(r[0]);
+        const name = (r[1] || '').trim();
+        const kana = (r[2] || '').trim();
+        const code = (r[3] || '').trim();
+        if (!name || !Number.isFinite(number) || !code) continue;
+        await DB.add('students', { number, name, kana, code, active: true });
         count++;
       }
       showToast(`${count}件 取り込みました`);
@@ -576,7 +651,7 @@ async function renderTeacherItems() {
     const kana = String(fd.get('kana') || '').trim();
     const hasDeadline = !!fd.get('hasDeadline');
     if (!name) return;
-    await DB.add('items', { name, kana, hasDeadline, subject: '', memo: '', active: true });
+    await addItemLocal({ name, kana, hasDeadline, subject: '', memo: '', active: true });
     renderTeacherItems();
   });
   document.getElementById('itemCsvFile').addEventListener('change', async (e) => {
@@ -591,7 +666,7 @@ async function renderTeacherItems() {
         const kana = (r[1] || '').trim();
         const hasDeadline = (r[2] || '').trim() === '1';
         if (!name) continue;
-        await DB.add('items', { name, kana, hasDeadline, subject: '', memo: '', active: true });
+        await addItemLocal({ name, kana, hasDeadline, subject: '', memo: '', active: true });
         count++;
       }
       showToast(`${count}件 取り込みました`);
@@ -626,10 +701,28 @@ async function renderTeacherToday() {
 }
 
 async function renderTeacherSettings() {
+  const classroomId = await Sync.getClassroomId();
+  const syncState = Sync.getSyncState();
   app.innerHTML = `
     <div class="screen teacher-page">
       ${teacherNav('settings')}
       <h1>設定</h1>
+      <section class="card">
+        <h2>クラウド同期（複数端末をリアルタイムで揃える）</h2>
+        <p style="color:#666;font-size:0.9rem;">児童の氏名・ふりがなは送信されません。送られるのはランダムなコードと、提出物・提出状況のみです。同期コードは合言葉のようなものなので、他人に教えないでください。</p>
+        ${classroomId ? `
+          <p>同期コード：<strong style="font-family:monospace;font-size:1.1rem;">${escapeHtml(classroomId)}</strong>　${syncState.connected ? '<span style="color:var(--ok);">● 接続中</span>' : '<span style="color:var(--muted);">○ 未接続</span>'}</p>
+          <p style="color:#666;font-size:0.85rem;">他の端末では、名簿画面で先に「名簿（コード付き）」を取り込んでから、この同期コードを入力して参加してください。</p>
+          <button class="mini-btn danger" id="leaveSyncBtn">同期をやめる</button>
+        ` : `
+          <p>まだ同期は設定されていません。</p>
+          <button class="mini-btn primary" id="startSyncBtn">この端末を最初の端末にして同期を始める</button>
+          <div class="form-row" style="margin-top:10px;">
+            <input type="text" id="joinCodeInput" placeholder="他の端末の同期コードを入力">
+            <button class="mini-btn" id="joinSyncBtn">参加する</button>
+          </div>
+        `}
+      </section>
       <section class="card">
         <h2>PIN変更</h2>
         <form id="pinForm" class="form-row">
@@ -663,6 +756,33 @@ async function renderTeacherSettings() {
       </section>
     </div>
   `;
+  const startSyncBtn = document.getElementById('startSyncBtn');
+  if (startSyncBtn) {
+    startSyncBtn.addEventListener('click', async () => {
+      const id = await Sync.startNewClassroom();
+      showToast('同期を開始しました');
+      renderTeacherSettings();
+    });
+  }
+  const joinSyncBtn = document.getElementById('joinSyncBtn');
+  if (joinSyncBtn) {
+    joinSyncBtn.addEventListener('click', async () => {
+      const code = document.getElementById('joinCodeInput').value.trim();
+      if (!code) return;
+      await Sync.joinClassroom(code);
+      showToast('参加しました');
+      renderTeacherSettings();
+    });
+  }
+  const leaveSyncBtn = document.getElementById('leaveSyncBtn');
+  if (leaveSyncBtn) {
+    leaveSyncBtn.addEventListener('click', async () => {
+      if (!confirm('同期をやめます。この端末はクラウドから切り離されますが、今のデータはそのまま残ります。よろしいですか？')) return;
+      await Sync.leaveClassroom();
+      showToast('同期をやめました');
+      renderTeacherSettings();
+    });
+  }
   document.getElementById('pinForm').addEventListener('submit', async (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
@@ -692,6 +812,10 @@ async function renderTeacherSettings() {
   document.getElementById('resetYearBtn').addEventListener('click', async () => {
     if (!confirm('バックアップは書き出し済みですか？\nこの操作を行うと、今の名簿・提出物・提出記録がすべて消えます。元には戻せません。よろしいですか？')) return;
     if (!confirm('本当によろしいですか？もう一度確認します。')) return;
+    if (await Sync.isSyncEnabled()) {
+      if (!confirm('クラウド同期が有効です。同期している他の端末にも影響します（同期をやめてからリセットする場合は「キャンセル」を押し、先に設定から同期をやめてください）。このまま同期をやめてリセットしますか？')) return;
+      await Sync.leaveClassroom();
+    }
     for (const store of ['students', 'items', 'assignments', 'statuses', 'history']) {
       await DB.clear(store);
     }
@@ -1073,6 +1197,7 @@ async function handleAction(action, ds) {
       const it = await DB.get('items', Number(ds.id));
       it.active = it.active === false ? true : false;
       await DB.put('items', it);
+      Sync.pushItem(it);
       renderTeacherItems();
       return;
     }
@@ -1096,7 +1221,7 @@ async function handleAction(action, ds) {
         openDeadlineSheet(itemId);
         return;
       }
-      await DB.add('assignments', { date: todayStr(), itemId, deadline: null });
+      await addAssignmentLocal({ date: todayStr(), itemId, deadline: null });
       renderTeacherToday();
       return;
     }
@@ -1104,14 +1229,14 @@ async function handleAction(action, ds) {
       const itemId = Number(ds.id);
       const input = document.getElementById('deadlineInput');
       const deadline = input && input.value ? new Date(input.value).toISOString() : null;
-      await DB.add('assignments', { date: todayStr(), itemId, deadline });
+      await addAssignmentLocal({ date: todayStr(), itemId, deadline });
       closeModal();
       renderTeacherToday();
       return;
     }
     case 'skipDeadline': {
       const itemId = Number(ds.id);
-      await DB.add('assignments', { date: todayStr(), itemId, deadline: null });
+      await addAssignmentLocal({ date: todayStr(), itemId, deadline: null });
       closeModal();
       renderTeacherToday();
       return;
@@ -1158,6 +1283,8 @@ async function main() {
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('./sw.js').catch(() => {});
     }
+    Sync.onSyncChange(() => render());
+    if (await Sync.isSyncEnabled()) Sync.startSync();
     await render();
   } catch (err) {
     app.innerHTML = `

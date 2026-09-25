@@ -1,6 +1,6 @@
-// IndexedDBの薄いラッパー。外部通信は一切行わず、すべて端末内に保存する。
+// IndexedDBの薄いラッパー。児童の氏名等はここ(端末内)にのみ保存する。
 const DB_NAME = 'submissionTrackerDB';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 let dbPromise = null;
 
@@ -8,32 +8,51 @@ function openDB() {
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = () => {
+    req.onupgradeneeded = (event) => {
       const db = req.result;
+      const t = event.target.transaction;
+
+      let students, items, assignments, statuses, history;
 
       if (!db.objectStoreNames.contains('students')) {
-        const s = db.createObjectStore('students', { keyPath: 'id', autoIncrement: true });
-        s.createIndex('number', 'number', { unique: true });
+        students = db.createObjectStore('students', { keyPath: 'id', autoIncrement: true });
+        students.createIndex('number', 'number', { unique: true });
+      } else {
+        students = t.objectStore('students');
       }
       if (!db.objectStoreNames.contains('items')) {
-        db.createObjectStore('items', { keyPath: 'id', autoIncrement: true });
+        items = db.createObjectStore('items', { keyPath: 'id', autoIncrement: true });
+      } else {
+        items = t.objectStore('items');
       }
       if (!db.objectStoreNames.contains('assignments')) {
-        const a = db.createObjectStore('assignments', { keyPath: 'id', autoIncrement: true });
-        a.createIndex('date', 'date', { unique: false });
+        assignments = db.createObjectStore('assignments', { keyPath: 'id', autoIncrement: true });
+        assignments.createIndex('date', 'date', { unique: false });
+      } else {
+        assignments = t.objectStore('assignments');
       }
       if (!db.objectStoreNames.contains('statuses')) {
-        const st = db.createObjectStore('statuses', { keyPath: 'key' });
-        st.createIndex('studentId', 'studentId', { unique: false });
-        st.createIndex('assignmentId', 'assignmentId', { unique: false });
+        statuses = db.createObjectStore('statuses', { keyPath: 'key' });
+        statuses.createIndex('studentId', 'studentId', { unique: false });
+        statuses.createIndex('assignmentId', 'assignmentId', { unique: false });
+      } else {
+        statuses = t.objectStore('statuses');
       }
       if (!db.objectStoreNames.contains('history')) {
-        const h = db.createObjectStore('history', { keyPath: 'id', autoIncrement: true });
-        h.createIndex('studentId', 'studentId', { unique: false });
-        h.createIndex('assignmentId', 'assignmentId', { unique: false });
+        history = db.createObjectStore('history', { keyPath: 'id', autoIncrement: true });
+        history.createIndex('studentId', 'studentId', { unique: false });
+        history.createIndex('assignmentId', 'assignmentId', { unique: false });
+      } else {
+        history = t.objectStore('history');
       }
       if (!db.objectStoreNames.contains('meta')) {
         db.createObjectStore('meta', { keyPath: 'key' });
+      }
+
+      // v2: クラウド同期用の索引(端末をまたいだ突き合わせに使う)
+      if (event.oldVersion < 2) {
+        if (!students.indexNames.contains('code')) students.createIndex('code', 'code', { unique: false });
+        if (!history.indexNames.contains('fsId')) history.createIndex('fsId', 'fsId', { unique: false });
       }
     };
     req.onsuccess = () => resolve(req.result);
