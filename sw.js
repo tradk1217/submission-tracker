@@ -1,4 +1,4 @@
-const CACHE_NAME = 'submission-tracker-v7';
+const CACHE_NAME = 'submission-tracker-v9';
 const ASSETS = [
   './',
   './index.html',
@@ -7,6 +7,8 @@ const ASSETS = [
   './js/app.js',
   './js/db.js',
   './js/util.js',
+  './js/sync.js',
+  './js/firebase-config.js',
   './icons/icon-192.png',
   './icons/icon-512.png',
 ];
