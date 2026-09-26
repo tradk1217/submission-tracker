@@ -37,6 +37,7 @@ export function deadlineState(deadlineIso) {
 export function rubyHtml(text, kana) {
   const t = escapeHtml(text || '');
   if (!kana) return t;
+  if (!/[一-龯]/.test(text || '')) return t; // 漢字を含まない語にはルビを付けない
   return `<ruby>${t}<rt>${escapeHtml(kana)}</rt></ruby>`;
 }
 
@@ -44,6 +45,41 @@ export function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
   }[c]));
+}
+
+export function katakanaToHiragana(s) {
+  return s.replace(/[ァ-ヶ]/g, c => String.fromCharCode(c.charCodeAt(0) - 0x60));
+}
+
+// ひらがな・カタカナ・数字・記号のみ(漢字を含まない)かどうか
+export function isKanaOrPlain(s) {
+  return /^[ぁ-ゖァ-ヶーー0-9０-９a-zA-Z\s・、。ー\-]*$/.test(s);
+}
+
+// 氏名入力欄からふりがな欄を自動入力する。
+// ・ひらがな/カタカナ/数字だけの入力はそのままひらがなに変換して反映
+// ・漢字入力は、IME変換前の読み(compositionupdateイベント)を可能な範囲で拾う(確実ではないベストエフォート)
+// ・ふりがな欄をユーザーが自分で編集したら、以降は自動上書きしない
+export function attachFuriganaAutofill(nameInput, kanaInput) {
+  let userEdited = false;
+  let lastComposition = '';
+  kanaInput.addEventListener('input', () => { userEdited = true; });
+  nameInput.addEventListener('compositionupdate', (e) => {
+    lastComposition = e.data || '';
+  });
+  nameInput.addEventListener('compositionend', () => {
+    lastComposition = '';
+  });
+  nameInput.addEventListener('input', () => {
+    if (userEdited) return;
+    const val = nameInput.value;
+    if (val && isKanaOrPlain(val)) {
+      kanaInput.value = katakanaToHiragana(val);
+    } else if (lastComposition && /^[ぁ-ゖァ-ヶー]*$/.test(lastComposition)) {
+      // 変換直前のひらがな/カタカナを暫定表示(確定後に手直しできる)
+      kanaInput.value = katakanaToHiragana(lastComposition);
+    }
+  });
 }
 
 export function uid() {

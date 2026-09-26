@@ -200,7 +200,7 @@ export async function startSync() {
       const data = change.doc.data();
       const localItemId = await localItemIdBySyncId(data.itemSyncId);
       const row = {
-        date: data.date, deadline: data.deadline || null, syncId,
+        date: data.date, deadline: data.deadline || null, detail: data.detail || '', syncId,
         itemId: localItemId,
         ...(localItemId ? {} : { _pendingItemSyncId: data.itemSyncId }),
       };
@@ -293,7 +293,8 @@ export function pushAssignment(localAssignment, itemSyncId) {
   return withFs(async (classroomId) => {
     const { doc, setDoc } = fsApi;
     await setDoc(doc(dbFs, 'classes', classroomId, 'assignments', localAssignment.syncId), {
-      date: localAssignment.date, deadline: localAssignment.deadline || null, itemSyncId,
+      date: localAssignment.date, deadline: localAssignment.deadline || null,
+      detail: localAssignment.detail || '', itemSyncId,
     });
   });
 }
