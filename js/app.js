@@ -198,6 +198,16 @@ async function deleteStudentCascade(studentId) {
   await DB.delete('students', studentId);
 }
 
+async function studentNameExists(name, excludeId = null) {
+  const all = await DB.getAll('students');
+  return all.some(s => s.name === name && s.id !== excludeId);
+}
+
+async function itemNameExists(name, excludeId = null) {
+  const all = await DB.getAll('items');
+  return all.some(i => i.name === name && i.id !== excludeId);
+}
+
 async function addItemLocal(data) {
   const syncId = uid();
   const id = await DB.add('items', { ...data, syncId });
@@ -264,10 +274,9 @@ async function renderChildConfirm() {
   resetInactivityTimer();
 }
 
-async function renderChildPage() {
-  const student = await DB.get('students', state.studentId);
-  if (!student) { goto('childSelect'); return; }
-
+// 児童画面の「今出すもの／直すもの／後で出すもの」の振り分け。
+// finishChild・markAllSubmittedからも同じ基準を使うために共通化している。
+async function getChildRows(studentId) {
   const today = todayStr();
   const allAssignments = await getAllAssignmentsWithItems();
   const todayRows = [];
@@ -275,7 +284,7 @@ async function renderChildPage() {
   const laterRows = [];
   for (const a of allAssignments) {
     if (!a.item) continue;
-    const st = await getStatus(student.id, a.id);
+    const st = await getStatus(studentId, a.id);
     const eff = effectiveStatus(a.id, st.status);
     if (eff === STATUS.REDO || eff === STATUS.RESUBMIT_WAIT) {
       redoRows.push({ a, st });
@@ -291,6 +300,14 @@ async function renderChildPage() {
       todayRows.push({ a, st, eff, overdue: a.date < today });
     }
   }
+  return { todayRows, redoRows, laterRows };
+}
+
+async function renderChildPage() {
+  const student = await DB.get('students', state.studentId);
+  if (!student) { goto('childSelect'); return; }
+
+  const { todayRows, redoRows, laterRows } = await getChildRows(student.id);
 
   const history = await getStudentStatuses(student.id);
   const submittedCount = history.filter(h => h.status === STATUS.SUBMITTED).length;
@@ -417,17 +434,43 @@ async function openItemSheet(assignmentId) {
   `);
 }
 
-function openPlanSheet(assignmentId, targetStatus) {
+// 土日・登録済みの休業日（祝日など）を「いつ出す」の選択肢から外すための仕組み。
+async function getHolidays() {
+  const list = await getMeta('holidays', []);
+  return Array.isArray(list) ? list : [];
+}
+
+function isSchoolDay(dateStr, holidaySet) {
+  const wd = new Date(dateStr + 'T00:00:00').getDay();
+  if (wd === 0 || wd === 6) return false;
+  return !holidaySet.has(dateStr);
+}
+
+// fromDateStrを含めて、学校がある日をcount件、日付が早い順に集める。
+function nextSchoolDays(fromDateStr, count, holidaySet) {
+  const results = [];
+  let d = fromDateStr;
+  let offset = 0;
+  let guard = 0;
+  while (results.length < count && guard < 60) {
+    if (isSchoolDay(d, holidaySet)) results.push({ date: d, offset });
+    d = addDays(d, 1);
+    offset++;
+    guard++;
+  }
+  return results;
+}
+
+async function openPlanSheet(assignmentId, targetStatus) {
   const weekdayNames = ['日', '月', '火', '水', '木', '金', '土'];
-  const options = [
-    { days: 0, label: '今日中', kana: 'きょうじゅう' },
-    { days: 1, label: '明日', kana: 'あした' },
-    { days: 2, label: '明後日', kana: 'あさって' },
-  ];
-  const buttons = options.map(o => {
-    const date = addDays(todayStr(), o.days);
+  const labels = { 0: ['今日中', 'きょうじゅう'], 1: ['明日', 'あした'], 2: ['明後日', 'あさって'] };
+  const holidays = await getHolidays();
+  const holidaySet = new Set(holidays.map(h => h.date));
+  const candidates = nextSchoolDays(todayStr(), 3, holidaySet);
+  const buttons = candidates.map(({ date, offset }) => {
     const wd = weekdayNames[new Date(date + 'T00:00:00').getDay()];
-    return `<button class="big-btn" data-action="pickPlanDate" data-date="${date}" data-status="${targetStatus}" data-assignment="${assignmentId}">${rubyHtml(o.label, o.kana)}　${formatDateJp(date)}(${wd})</button>`;
+    const label = labels[offset] ? rubyHtml(labels[offset][0], labels[offset][1]) + '　' : '';
+    return `<button class="big-btn" data-action="pickPlanDate" data-date="${date}" data-status="${targetStatus}" data-assignment="${assignmentId}">${label}${formatDateJp(date)}(${wd})</button>`;
   }).join('');
   renderModal(`
     <h3>いつ${rubyHtml('出', 'だ')}す？</h3>
@@ -439,11 +482,14 @@ function openPlanSheet(assignmentId, targetStatus) {
   `);
 }
 
-function openPlanCustomDate(assignmentId, targetStatus) {
-  const minDate = todayStr();
+async function openPlanCustomDate(assignmentId, targetStatus) {
+  const holidays = await getHolidays();
+  const holidaySet = new Set(holidays.map(h => h.date));
+  const [minDate] = nextSchoolDays(todayStr(), 1, holidaySet).map(c => c.date);
   renderModal(`
     <h3>${rubyHtml('日付', 'ひづけ')}を${rubyHtml('選', 'えら')}ぶ</h3>
     <input type="date" id="customPlanDate" min="${minDate}" value="${minDate}" class="deadline-input">
+    <p style="color:#666;font-size:0.85rem;">土日・お休みの日は選べません。</p>
     <div class="sheet-buttons">
       <button class="big-btn yes" data-action="pickPlanDateCustom" data-status="${targetStatus}" data-assignment="${assignmentId}">${rubyHtml('次', 'つぎ')}へ</button>
       <button class="big-btn cancel" data-action="closeModal">${rubyHtml('やめる', '')}</button>
@@ -708,6 +754,10 @@ async function renderTeacherStudents() {
     const name = String(fd.get('name')).trim();
     const kana = String(fd.get('kana') || '').trim();
     if (!name) return;
+    if (await studentNameExists(name)) {
+      alert(`「${name}」という名前はすでに登録されています。`);
+      return;
+    }
     await DB.add('students', { number, name, kana, code: generateCode(), active: true });
     renderTeacherStudents();
   });
@@ -720,16 +770,19 @@ async function renderTeacherStudents() {
     try {
       const text = await file.text();
       const rows = parseCsv(text).slice(1);
-      let count = 0;
+      const existingNames = new Set((await DB.getAll('students')).map(s => s.name));
+      let count = 0, skipped = 0;
       for (const r of rows) {
         const number = Number(r[0]);
         const name = (r[1] || '').trim();
         const kana = (r[2] || '').trim();
         if (!name || !Number.isFinite(number)) continue;
+        if (existingNames.has(name)) { skipped++; continue; }
         await DB.add('students', { number, name, kana, code: generateCode(), active: true });
+        existingNames.add(name);
         count++;
       }
-      showToast(`${count}件 取り込みました`);
+      showToast(`${count}件 取り込みました${skipped ? `（重複のため${skipped}件スキップ）` : ''}`);
       renderTeacherStudents();
     } catch (err) {
       alert('CSVの読み込みに失敗しました: ' + (err && err.message ? err.message : String(err)));
@@ -752,17 +805,20 @@ async function renderTeacherStudents() {
     try {
       const text = await file.text();
       const rows = parseCsv(text).slice(1);
-      let count = 0;
+      const existingNames = new Set((await DB.getAll('students')).map(s => s.name));
+      let count = 0, skipped = 0;
       for (const r of rows) {
         const number = Number(r[0]);
         const name = (r[1] || '').trim();
         const kana = (r[2] || '').trim();
         const code = (r[3] || '').trim();
         if (!name || !Number.isFinite(number) || !code) continue;
+        if (existingNames.has(name)) { skipped++; continue; }
         await DB.add('students', { number, name, kana, code, active: true });
+        existingNames.add(name);
         count++;
       }
-      showToast(`${count}件 取り込みました`);
+      showToast(`${count}件 取り込みました${skipped ? `（重複のため${skipped}件スキップ）` : ''}`);
       renderTeacherStudents();
     } catch (err) {
       alert('CSVの読み込みに失敗しました: ' + (err && err.message ? err.message : String(err)));
@@ -840,6 +896,10 @@ async function renderTeacherItems() {
     const name = String(fd.get('name')).trim();
     const kana = String(fd.get('kana') || '').trim();
     if (!name) return;
+    if (await itemNameExists(name)) {
+      alert(`「${name}」という提出物名はすでに登録されています。`);
+      return;
+    }
     await addItemLocal({ name, kana, subject: '', memo: '', active: true });
     renderTeacherItems();
   });
@@ -852,15 +912,18 @@ async function renderTeacherItems() {
     try {
       const text = await file.text();
       const rows = parseCsv(text).slice(1);
-      let count = 0;
+      const existingNames = new Set((await DB.getAll('items')).map(i => i.name));
+      let count = 0, skipped = 0;
       for (const r of rows) {
         const name = (r[0] || '').trim();
         const kana = (r[1] || '').trim();
         if (!name) continue;
+        if (existingNames.has(name)) { skipped++; continue; }
         await addItemLocal({ name, kana, subject: '', memo: '', active: true });
+        existingNames.add(name);
         count++;
       }
-      showToast(`${count}件 取り込みました`);
+      showToast(`${count}件 取り込みました${skipped ? `（重複のため${skipped}件スキップ）` : ''}`);
       renderTeacherItems();
     } catch (err) {
       alert('CSVの読み込みに失敗しました: ' + (err && err.message ? err.message : String(err)));
@@ -1085,6 +1148,45 @@ async function renderTimePresetCard() {
   });
 }
 
+async function renderHolidayCard() {
+  const card = document.getElementById('holidayCard');
+  if (!card) return;
+  const holidays = (await getHolidays()).slice().sort((a, b) => a.date.localeCompare(b.date));
+  card.innerHTML = `
+    <h2>お休みの日（祝日・学校行事など）</h2>
+    <p style="color:#666;font-size:0.9rem;">土日は自動的に選択肢から外れます。祝日や学校のお休みなど、それ以外の日をここに追加すると、児童の「いつ出す」の選択肢から外れます。</p>
+    <div class="form-row" style="margin-bottom:12px;">
+      <input type="date" id="newHolidayDate" style="padding:8px;border:1px solid var(--border);border-radius:8px;">
+      <input type="text" id="newHolidayLabel" placeholder="名前（任意・例：運動会）" style="flex:1;min-width:120px;padding:8px;border:1px solid var(--border);border-radius:8px;">
+      <button class="mini-btn primary" id="addHolidayBtn" type="button">追加</button>
+    </div>
+    <ul class="t-list" id="holidayList">
+      ${holidays.map(h => `
+        <li class="t-row" data-date="${escapeHtml(h.date)}">
+          <span class="t-name">${formatDateJp(h.date)}${h.label ? '　' + escapeHtml(h.label) : ''}</span>
+          <button class="mini-btn danger" data-action="removeHoliday" data-date="${escapeHtml(h.date)}" type="button">削除</button>
+        </li>
+      `).join('') || '<li class="empty-row">登録されていません</li>'}
+    </ul>
+  `;
+  document.getElementById('addHolidayBtn').addEventListener('click', async () => {
+    const dateVal = document.getElementById('newHolidayDate').value;
+    if (!dateVal) return;
+    const label = document.getElementById('newHolidayLabel').value.trim();
+    const next = holidays.filter(h => h.date !== dateVal);
+    next.push({ date: dateVal, label });
+    await setMeta('holidays', next);
+    renderHolidayCard();
+  });
+  card.querySelectorAll('[data-action="removeHoliday"]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const next = holidays.filter(h => h.date !== btn.dataset.date);
+      await setMeta('holidays', next);
+      renderHolidayCard();
+    });
+  });
+}
+
 async function renderTeacherSettings() {
   const classroomId = await Sync.getClassroomId();
   const syncState = Sync.getSyncState();
@@ -1120,6 +1222,7 @@ async function renderTeacherSettings() {
         </form>
       </section>
       <section class="card" id="timePresetCard"></section>
+      <section class="card" id="holidayCard"></section>
       <section class="card">
         <h2>バックアップ（他の端末に移す）</h2>
         <p style="color:#666;font-size:0.9rem;">データは各端末に個別に保存されています。他の端末（iPhoneなど）でも同じ内容を見られるようにするには、この端末で書き出したファイルを、もう一方の端末で読み込んでください。児童の氏名を含みます。読み込むと今の端末のデータは上書きされます。</p>
@@ -1147,6 +1250,7 @@ async function renderTeacherSettings() {
     </div>
   `;
   await renderTimePresetCard();
+  await renderHolidayCard();
   const showQrBtn = document.getElementById('showQrBtn');
   if (showQrBtn) {
     showQrBtn.addEventListener('click', () => showJoinQr(classroomId));
@@ -1416,17 +1520,20 @@ function openRosterQrScanner() {
 async function handleScannedRosterCsv(text) {
   try {
     const rows = parseCsv(text).slice(1);
-    let count = 0;
+    const existingNames = new Set((await DB.getAll('students')).map(s => s.name));
+    let count = 0, skipped = 0;
     for (const r of rows) {
       const number = Number(r[0]);
       const name = (r[1] || '').trim();
       const kana = (r[2] || '').trim();
       const code = (r[3] || '').trim();
       if (!name || !Number.isFinite(number) || !code) continue;
+      if (existingNames.has(name)) { skipped++; continue; }
       await DB.add('students', { number, name, kana, code, active: true });
+      existingNames.add(name);
       count++;
     }
-    showToast(`${count}件 取り込みました`);
+    showToast(`${count}件 取り込みました${skipped ? `（重複のため${skipped}件スキップ）` : ''}`);
     renderTeacherStudents();
   } catch (err) {
     alert('QRコードの内容を読み込めませんでした: ' + (err && err.message ? err.message : String(err)));
@@ -1702,13 +1809,8 @@ async function handleAction(action, ds) {
       goto('childSelect');
       return;
     case 'finishChild': {
-      const todayList = await getTodayAssignments();
-      const untouched = [];
-      for (const a of todayList) {
-        if (!a.item) continue;
-        const st = await getStatus(state.studentId, a.id);
-        if (effectiveStatus(a.id, st.status) === STATUS.NOT_SUBMITTED) untouched.push(a);
-      }
+      const { todayRows } = await getChildRows(state.studentId);
+      const untouched = todayRows.filter(({ eff }) => eff === STATUS.NOT_SUBMITTED).map(({ a }) => a);
       if (state.pending.size === 0 && untouched.length === 0) {
         goto('childSelect');
         return;
@@ -1718,13 +1820,13 @@ async function handleAction(action, ds) {
     }
     case 'confirmRegister': {
       const studentId = state.studentId;
+      const { todayRows: beforeRows } = await getChildRows(studentId);
+      const assignmentIds = beforeRows.map(({ a }) => a.id);
       await commitPending();
       closeModal();
-      const todayList = await getTodayAssignments();
-      const validToday = todayList.filter(a => a.item);
-      let allDone = validToday.length > 0;
-      for (const a of validToday) {
-        const st = await getStatus(studentId, a.id);
+      let allDone = assignmentIds.length > 0;
+      for (const id of assignmentIds) {
+        const st = await getStatus(studentId, id);
         if (st.status !== STATUS.SUBMITTED && st.status !== STATUS.EXEMPT) { allDone = false; break; }
       }
       if (allDone) showCelebration(); else showToast('登録したよ！');
@@ -1741,7 +1843,7 @@ async function handleAction(action, ds) {
       openItemSheet(Number(ds.assignment));
       return;
     case 'openPlanSheet':
-      openPlanSheet(Number(ds.assignment), ds.status || STATUS.FORGOTTEN);
+      await openPlanSheet(Number(ds.assignment), ds.status || STATUS.FORGOTTEN);
       return;
     case 'openRedoSheet':
       openRedoSheet(Number(ds.assignment));
@@ -1758,11 +1860,9 @@ async function handleAction(action, ds) {
       return;
     }
     case 'markAllSubmitted': {
-      const todayList = await getTodayAssignments();
-      for (const a of todayList) {
-        if (!a.item) continue;
-        const st = await getStatus(state.studentId, a.id);
-        if (effectiveStatus(a.id, st.status) === STATUS.NOT_SUBMITTED) {
+      const { todayRows } = await getChildRows(state.studentId);
+      for (const { a, eff } of todayRows) {
+        if (eff === STATUS.NOT_SUBMITTED) {
           state.pending.set(a.id, { status: STATUS.SUBMITTED, plannedDate: null });
         }
       }
@@ -1775,12 +1875,18 @@ async function handleAction(action, ds) {
       return;
     }
     case 'openPlanCustomDate': {
-      openPlanCustomDate(Number(ds.assignment), ds.status);
+      await openPlanCustomDate(Number(ds.assignment), ds.status);
       return;
     }
     case 'pickPlanDateCustom': {
       const dateVal = document.getElementById('customPlanDate').value;
       if (!dateVal) return;
+      const holidays = await getHolidays();
+      const holidaySet = new Set(holidays.map(h => h.date));
+      if (!isSchoolDay(dateVal, holidaySet)) {
+        alert('土日やお休みの日は選べません。学校がある日を選んでください。');
+        return;
+      }
       await openPlanTimeSheet(Number(ds.assignment), ds.status, dateVal);
       return;
     }
@@ -1919,6 +2025,10 @@ async function handleAction(action, ds) {
       const name = document.getElementById('editStudentName').value.trim();
       const kana = document.getElementById('editStudentKana').value.trim();
       if (!name || !Number.isFinite(number)) return;
+      if (await studentNameExists(name, s.id)) {
+        alert(`「${name}」という名前はすでに登録されています。`);
+        return;
+      }
       s.number = number;
       s.name = name;
       s.kana = kana;
