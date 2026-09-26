@@ -449,16 +449,30 @@ function openPlanCustomDate(assignmentId, targetStatus) {
   `);
 }
 
-function openPlanTimeSheet(assignmentId, targetStatus, dateStr) {
-  const isToday = dateStr === todayStr();
-  const defaultTime = isToday ? '15:00' : '08:30';
+const DEFAULT_TIME_PRESETS = [
+  { time: '08:10', label: '朝の会まで', kana: 'あさのかいまで' },
+  { time: '10:30', label: '3時間目が始まるまで', kana: 'さんじかんめがはじまるまで' },
+  { time: '13:15', label: '5時間目が始まるまで', kana: 'ごじかんめがはじまるまで' },
+  { time: '15:00', label: '帰るまで', kana: 'かえるまで' },
+  { time: '16:30', label: '放課後', kana: 'ほうかご' },
+];
+
+async function getTimePresets() {
+  const presets = await getMeta('timePresets', null);
+  return (Array.isArray(presets) && presets.length) ? presets : DEFAULT_TIME_PRESETS;
+}
+
+async function openPlanTimeSheet(assignmentId, targetStatus, dateStr) {
   const weekdayNames = ['日', '月', '火', '水', '木', '金', '土'];
   const wd = weekdayNames[new Date(dateStr + 'T00:00:00').getDay()];
+  const presets = await getTimePresets();
+  const buttons = presets.map(p =>
+    `<button class="big-btn" data-action="setPlan" data-date="${dateStr}" data-time="${p.time}" data-status="${targetStatus}" data-assignment="${assignmentId}">${rubyHtml(p.label, p.kana)}</button>`
+  ).join('');
   renderModal(`
     <h3>${formatDateJp(dateStr)}(${wd}) ${rubyHtml('何時', 'なんじ')}まで？</h3>
-    <input type="time" id="customPlanTime" value="${defaultTime}" class="deadline-input">
     <div class="sheet-buttons">
-      <button class="big-btn yes" data-action="setPlan" data-date="${dateStr}" data-status="${targetStatus}" data-assignment="${assignmentId}">${rubyHtml('決', 'き')}める</button>
+      ${buttons}
       <button class="big-btn cancel" data-action="closeModal">${rubyHtml('やめる', '')}</button>
     </div>
   `);
@@ -998,6 +1012,60 @@ async function removeAssignmentCascade(assignmentId) {
   Sync.deleteAssignmentRemote(assignment);
 }
 
+async function renderTimePresetCard() {
+  const card = document.getElementById('timePresetCard');
+  if (!card) return;
+  const presets = await getTimePresets();
+  card.innerHTML = `
+    <h2>提出時刻の選択肢</h2>
+    <p style="color:#666;font-size:0.9rem;">児童が「いつまでに出す」を選ぶときの選択肢です。学校の時程に合わせて自由に編集してください（変更するとすぐに反映されます）。</p>
+    <div id="timePresetList">
+      ${presets.map((p, i) => `
+        <div class="form-row" style="margin-bottom:8px;align-items:center;" data-index="${i}">
+          <input type="time" class="tp-time" value="${escapeHtml(p.time)}" style="padding:8px;border:1px solid var(--border);border-radius:8px;">
+          <input type="text" class="tp-label" value="${escapeHtml(p.label)}" placeholder="表示名（例：朝の会まで）" style="flex:1;min-width:140px;padding:8px;border:1px solid var(--border);border-radius:8px;">
+          <input type="text" class="tp-kana" value="${escapeHtml(p.kana || '')}" placeholder="ふりがな（任意）" style="width:120px;padding:8px;border:1px solid var(--border);border-radius:8px;">
+          <button class="mini-btn danger" data-action="removeTimePreset" data-index="${i}" type="button">削除</button>
+        </div>
+      `).join('') || '<p class="empty-row">選択肢がありません。追加してください。</p>'}
+    </div>
+    <button class="mini-btn" id="addTimePresetBtn" type="button">＋ 選択肢を追加</button>
+    <button class="mini-btn" id="resetTimePresetsBtn" type="button">初期設定に戻す</button>
+  `;
+  card.querySelectorAll('.tp-time, .tp-label, .tp-kana').forEach(input => {
+    input.addEventListener('change', async () => {
+      const row = input.closest('[data-index]');
+      const i = Number(row.dataset.index);
+      const nameInput = row.querySelector('.tp-label');
+      const kanaInput = row.querySelector('.tp-kana');
+      presets[i] = {
+        time: row.querySelector('.tp-time').value || '23:59',
+        label: nameInput.value.trim(),
+        kana: kanaInput.value.trim(),
+      };
+      await setMeta('timePresets', presets);
+    });
+  });
+  card.querySelectorAll('[data-action="removeTimePreset"]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const i = Number(btn.dataset.index);
+      presets.splice(i, 1);
+      await setMeta('timePresets', presets);
+      renderTimePresetCard();
+    });
+  });
+  document.getElementById('addTimePresetBtn').addEventListener('click', async () => {
+    presets.push({ time: '15:00', label: '', kana: '' });
+    await setMeta('timePresets', presets);
+    renderTimePresetCard();
+  });
+  document.getElementById('resetTimePresetsBtn').addEventListener('click', async () => {
+    if (!confirm('提出時刻の選択肢を初期設定に戻します。よろしいですか？')) return;
+    await setMeta('timePresets', null);
+    renderTimePresetCard();
+  });
+}
+
 async function renderTeacherSettings() {
   const classroomId = await Sync.getClassroomId();
   const syncState = Sync.getSyncState();
@@ -1032,6 +1100,7 @@ async function renderTeacherSettings() {
           <button type="submit" class="mini-btn primary">変更</button>
         </form>
       </section>
+      <section class="card" id="timePresetCard"></section>
       <section class="card">
         <h2>バックアップ（他の端末に移す）</h2>
         <p style="color:#666;font-size:0.9rem;">データは各端末に個別に保存されています。他の端末（iPhoneなど）でも同じ内容を見られるようにするには、この端末で書き出したファイルを、もう一方の端末で読み込んでください。児童の氏名を含みます。読み込むと今の端末のデータは上書きされます。</p>
@@ -1058,6 +1127,7 @@ async function renderTeacherSettings() {
       </section>
     </div>
   `;
+  await renderTimePresetCard();
   const showQrBtn = document.getElementById('showQrBtn');
   if (showQrBtn) {
     showQrBtn.addEventListener('click', () => showJoinQr(classroomId));
@@ -1672,7 +1742,7 @@ async function handleAction(action, ds) {
       return;
     }
     case 'pickPlanDate': {
-      openPlanTimeSheet(Number(ds.assignment), ds.status, ds.date);
+      await openPlanTimeSheet(Number(ds.assignment), ds.status, ds.date);
       return;
     }
     case 'openPlanCustomDate': {
@@ -1682,12 +1752,12 @@ async function handleAction(action, ds) {
     case 'pickPlanDateCustom': {
       const dateVal = document.getElementById('customPlanDate').value;
       if (!dateVal) return;
-      openPlanTimeSheet(Number(ds.assignment), ds.status, dateVal);
+      await openPlanTimeSheet(Number(ds.assignment), ds.status, dateVal);
       return;
     }
     case 'setPlan': {
       const assignmentId = Number(ds.assignment);
-      const timeVal = document.getElementById('customPlanTime').value || '23:59';
+      const timeVal = ds.time || '23:59';
       const plannedDate = localDateTimeToIso(ds.date, timeVal);
       const status = ds.status || STATUS.FORGOTTEN;
       state.pending.set(assignmentId, { status, plannedDate });
