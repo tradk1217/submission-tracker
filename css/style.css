@@ -193,6 +193,28 @@ html, body {
 }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
+.celebration-overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #ffb703, #fb8500);
+  z-index: 200;
+  opacity: 0;
+  transform: scale(0.85);
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}
+.celebration-overlay.show { opacity: 1; transform: scale(1); }
+.celebration-box {
+  color: white;
+  font-size: 2.4rem;
+  font-weight: bold;
+  text-align: center;
+  line-height: 1.5;
+  text-shadow: 0 2px 6px rgba(0,0,0,0.25);
+}
+
 /* ---- 教師モード ---- */
 .teacher-pin {
   text-align: center;
