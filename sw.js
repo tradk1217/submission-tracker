@@ -1,4 +1,4 @@
-const CACHE_NAME = 'submission-tracker-v14';
+const CACHE_NAME = 'submission-tracker-v15';
 const ASSETS = [
   './',
   './index.html',
@@ -15,7 +15,9 @@ const ASSETS = [
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then(cache => cache.addAll(ASSETS)).then(() => self.skipWaiting())
+    caches.open(CACHE_NAME).then(cache => Promise.all(
+      ASSETS.map(url => fetch(url, { cache: 'reload' }).then(res => cache.put(url, res)))
+    )).then(() => self.skipWaiting())
   );
 });
 
@@ -28,10 +30,11 @@ self.addEventListener('activate', (event) => {
 });
 
 // オンライン時は常に最新を取得し、取れない時だけキャッシュを使う（ネット優先）。
+// ブラウザ自身のHTTPキャッシュも経由しないよう明示的に no-store で取得する。
 self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
   event.respondWith(
-    fetch(event.request).then(res => {
+    fetch(event.request, { cache: 'no-store' }).then(res => {
       const copy = res.clone();
       caches.open(CACHE_NAME).then(cache => cache.put(event.request, copy));
       return res;
