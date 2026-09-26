@@ -116,6 +116,19 @@ function showToast(msg) {
   }, 1600);
 }
 
+function showCelebration() {
+  const el = document.createElement('div');
+  el.className = 'celebration-overlay';
+  el.innerHTML = `<div class="celebration-box">🎉<br>${rubyHtml('全部', 'ぜんぶ')}${rubyHtml('出', 'だ')}せたね！<br>すごい！</div>`;
+  document.body.appendChild(el);
+  requestAnimationFrame(() => el.classList.add('show'));
+  el.addEventListener('click', () => { el.classList.remove('show'); setTimeout(() => el.remove(), 300); });
+  setTimeout(() => {
+    el.classList.remove('show');
+    setTimeout(() => el.remove(), 400);
+  }, 2400);
+}
+
 // ---------- データ取得ヘルパー ----------
 
 async function getActiveStudents() {
@@ -388,28 +401,36 @@ async function openConfirmSheet(untouched) {
 async function openItemSheet(assignmentId) {
   const st = await getStatus(state.studentId, assignmentId);
   const eff = effectiveStatus(assignmentId, st.status);
-  const thirdButton = eff === STATUS.FORGOTTEN
-    ? `<button class="big-btn plan" data-action="openPlanSheet" data-assignment="${assignmentId}">${rubyHtml('予定日', 'よていび')}を${rubyHtml('決', 'き')}め${rubyHtml('直', 'なお')}す</button>`
-    : `<button class="big-btn" data-action="openPlanSheet" data-assignment="${assignmentId}">${rubyHtml('忘', 'わす')}れた</button>`;
+  const forgottenLabel = eff === STATUS.FORGOTTEN
+    ? `${rubyHtml('予定日', 'よていび')}を${rubyHtml('決', 'き')}め${rubyHtml('直', 'なお')}す`
+    : `${rubyHtml('忘', 'わす')}れた`;
   renderModal(`
     <h3>${rubyHtml('どうする？', '')}</h3>
     <div class="sheet-buttons">
       <button class="big-btn yes" data-action="setChildStatus" data-status="${STATUS.SUBMITTED}" data-assignment="${assignmentId}">${rubyHtml('出', 'だ')}せた</button>
-      <button class="big-btn" data-action="setChildStatus" data-status="${STATUS.IN_PROGRESS}" data-assignment="${assignmentId}">${rubyHtml('途中', 'とちゅう')}</button>
-      ${thirdButton}
+      <button class="big-btn" data-action="openPlanSheet" data-status="${STATUS.IN_PROGRESS}" data-assignment="${assignmentId}">${rubyHtml('途中', 'とちゅう')}</button>
+      <button class="big-btn" data-action="openPlanSheet" data-status="${STATUS.FORGOTTEN}" data-assignment="${assignmentId}">${forgottenLabel}</button>
       <button class="big-btn cancel" data-action="closeModal">${rubyHtml('やめる', '')}</button>
     </div>
   `);
 }
 
-function openPlanSheet(assignmentId) {
+function openPlanSheet(assignmentId, targetStatus) {
+  const weekdayNames = ['日', '月', '火', '水', '木', '金', '土'];
+  const options = [
+    { days: 0, label: '今日中', kana: 'きょうじゅう' },
+    { days: 1, label: '明日', kana: 'あした' },
+    { days: 2, label: '明後日', kana: 'あさって' },
+  ];
+  const buttons = options.map(o => {
+    const date = addDays(todayStr(), o.days);
+    const wd = weekdayNames[new Date(date + 'T00:00:00').getDay()];
+    return `<button class="big-btn" data-action="setPlan" data-days="${o.days}" data-status="${targetStatus}" data-assignment="${assignmentId}">${rubyHtml(o.label, o.kana)}　${formatDateJp(date)}(${wd})</button>`;
+  }).join('');
   renderModal(`
     <h3>いつ${rubyHtml('出', 'だ')}す？</h3>
     <div class="sheet-buttons">
-      <button class="big-btn" data-action="setPlan" data-days="1" data-assignment="${assignmentId}">${rubyHtml('明日', 'あした')}</button>
-      <button class="big-btn" data-action="setPlan" data-days="2" data-assignment="${assignmentId}">${rubyHtml('明後日', 'あさって')}</button>
-      <button class="big-btn" data-action="setPlan" data-days="3" data-assignment="${assignmentId}">3${rubyHtml('日後', 'にちご')}</button>
-      <button class="big-btn" data-action="setPlanNone" data-assignment="${assignmentId}">${rubyHtml('日付', 'ひづけ')}は${rubyHtml('決', 'き')}めない</button>
+      ${buttons}
       <button class="big-btn cancel" data-action="closeModal">${rubyHtml('やめる', '')}</button>
     </div>
   `);
@@ -1551,12 +1572,21 @@ async function handleAction(action, ds) {
       openConfirmSheet(untouched);
       return;
     }
-    case 'confirmRegister':
+    case 'confirmRegister': {
+      const studentId = state.studentId;
       await commitPending();
       closeModal();
-      showToast('登録したよ！');
+      const todayList = await getTodayAssignments();
+      const validToday = todayList.filter(a => a.item);
+      let allDone = validToday.length > 0;
+      for (const a of validToday) {
+        const st = await getStatus(studentId, a.id);
+        if (st.status !== STATUS.SUBMITTED && st.status !== STATUS.EXEMPT) { allDone = false; break; }
+      }
+      if (allDone) showCelebration(); else showToast('登録したよ！');
       goto('childSelect');
       return;
+    }
     case 'alreadyDone':
       showToast('もう出したよ！取り消しは先生に言ってね');
       return;
@@ -1567,7 +1597,7 @@ async function handleAction(action, ds) {
       openItemSheet(Number(ds.assignment));
       return;
     case 'openPlanSheet':
-      openPlanSheet(Number(ds.assignment));
+      openPlanSheet(Number(ds.assignment), ds.status || STATUS.FORGOTTEN);
       return;
     case 'openRedoSheet':
       openRedoSheet(Number(ds.assignment));
@@ -1600,15 +1630,8 @@ async function handleAction(action, ds) {
       const assignmentId = Number(ds.assignment);
       const days = Number(ds.days);
       const plannedDate = addDays(todayStr(), days);
-      state.pending.set(assignmentId, { status: STATUS.FORGOTTEN, plannedDate });
-      closeModal();
-      renderChildPage();
-      resetInactivityTimer();
-      return;
-    }
-    case 'setPlanNone': {
-      const assignmentId = Number(ds.assignment);
-      state.pending.set(assignmentId, { status: STATUS.FORGOTTEN, plannedDate: null });
+      const status = ds.status || STATUS.FORGOTTEN;
+      state.pending.set(assignmentId, { status, plannedDate });
       closeModal();
       renderChildPage();
       resetInactivityTimer();
