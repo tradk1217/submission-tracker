@@ -335,12 +335,11 @@ export function pushHistory(historyRow) {
   return withFs(async (classroomId) => {
     const code = await localStudentCode(historyRow.studentId);
     const assignmentSyncId = await localAssignmentSyncId(historyRow.assignmentId);
-    if (!code || !assignmentSyncId) return;
-    const { collection, addDoc } = fsApi;
-    const docRef = await addDoc(collection(dbFs, 'classes', classroomId, 'history'), {
+    if (!code || !assignmentSyncId || !historyRow.fsId) return;
+    const { doc, setDoc } = fsApi;
+    await setDoc(doc(dbFs, 'classes', classroomId, 'history', historyRow.fsId), {
       studentCode: code, assignmentSyncId,
       status: historyRow.status, actor: historyRow.actor, at: historyRow.at,
     });
-    if (historyRow.id) await DB.put('history', { ...historyRow, fsId: docRef.id });
   });
 }

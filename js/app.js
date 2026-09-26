@@ -23,8 +23,16 @@ const STATUS_META = {
 };
 
 function childLabel(status) {
-  const meta = STATUS_META[status];
-  return rubyHtml(meta.label, meta.kana);
+  switch (status) {
+    case STATUS.NOT_SUBMITTED: return 'まだ';
+    case STATUS.SUBMITTED: return rubyHtml('出', 'だ') + 'せた';
+    case STATUS.IN_PROGRESS: return rubyHtml('途中', 'とちゅう');
+    case STATUS.FORGOTTEN: return rubyHtml('忘', 'わす') + 'れた';
+    case STATUS.REDO: return rubyHtml('直', 'なお') + 'し';
+    case STATUS.RESUBMIT_WAIT: return rubyHtml('確認中', 'かくにんちゅう');
+    case STATUS.EXEMPT: return rubyHtml('免除', 'めんじょ');
+    default: return STATUS_META[status].label;
+  }
 }
 
 function itemNameHtml(a) {
@@ -52,20 +60,20 @@ const state = {
   modal: null,
   teacherTab: 'home',
   inactivityTimer: null,
-  pendingForgotten: new Set(), // 「終わったらここをおす」まで確定させない忘れマーク
+  pending: new Map(), // assignmentId -> {status, plannedDate} 「登録する」で確定させるまでの仮の選択
 };
 
 let pendingJoinCode = null;
 
 function effectiveStatus(assignmentId, dbStatus) {
-  return state.pendingForgotten.has(assignmentId) ? STATUS.FORGOTTEN : dbStatus;
+  return state.pending.has(assignmentId) ? state.pending.get(assignmentId).status : dbStatus;
 }
 
-async function commitPendingForgotten() {
-  for (const assignmentId of state.pendingForgotten) {
-    await setStatus(state.studentId, assignmentId, STATUS.FORGOTTEN, 'child');
+async function commitPending() {
+  for (const [assignmentId, p] of state.pending) {
+    await setStatus(state.studentId, assignmentId, p.status, 'child', p.plannedDate);
   }
-  state.pendingForgotten.clear();
+  state.pending.clear();
 }
 
 async function ensureBootstrap() {
@@ -90,7 +98,7 @@ function resetInactivityTimer() {
   if (state.inactivityTimer) clearTimeout(state.inactivityTimer);
   if (state.screen === 'childPage' || state.screen === 'childConfirm') {
     state.inactivityTimer = setTimeout(async () => {
-      await commitPendingForgotten();
+      await commitPending();
       goto('childSelect');
     }, 20000);
   }
@@ -120,11 +128,15 @@ async function getActiveItems() {
   return all.filter(i => i.active !== false);
 }
 
-async function getTodayAssignments() {
-  const list = await DB.getAllByIndex('assignments', 'date', todayStr());
+async function getAssignmentsForDate(date) {
+  const list = await DB.getAllByIndex('assignments', 'date', date);
   const items = await DB.getAll('items');
   const itemMap = Object.fromEntries(items.map(i => [i.id, i]));
   return list.map(a => ({ ...a, item: itemMap[a.itemId] }));
+}
+
+async function getTodayAssignments() {
+  return getAssignmentsForDate(todayStr());
 }
 
 async function getAllAssignmentsWithItems() {
@@ -155,9 +167,10 @@ async function setStatus(studentId, assignmentId, status, actor, plannedDate) {
     updatedBy: actor,
   };
   await DB.put('statuses', row);
-  const historyId = await DB.add('history', { studentId, assignmentId, status, actor, at: row.updatedAt });
+  const fsId = uid();
+  const historyId = await DB.add('history', { studentId, assignmentId, status, actor, at: row.updatedAt, fsId });
   Sync.pushStatus(row);
-  Sync.pushHistory({ id: historyId, studentId, assignmentId, status, actor, at: row.updatedAt });
+  Sync.pushHistory({ id: historyId, fsId, studentId, assignmentId, status, actor, at: row.updatedAt });
   return row;
 }
 
@@ -226,12 +239,12 @@ async function renderChildConfirm() {
   if (!student) { goto('childSelect'); return; }
   app.innerHTML = `
     <div class="screen child-confirm">
-      <p class="confirm-lead">${rubyHtml('この 番号で', 'このばんごうで')}</p>
+      <p class="confirm-lead">この${rubyHtml('番号', 'ばんごう')}で</p>
       <div class="confirm-name">${student.number}${rubyHtml('番', 'ばん')} ${rubyHtml(student.name, student.kana)}</div>
-      <p class="confirm-lead">${rubyHtml('間違いないですか？', 'まちがいないですか')}</p>
+      <p class="confirm-lead">${rubyHtml('間違', 'まちが')}いないですか？</p>
       <div class="confirm-buttons">
         <button class="big-btn yes" data-action="confirmStudent">${rubyHtml('はい', '')}</button>
-        <button class="big-btn no" data-action="cancelStudent">${rubyHtml('違う', 'ちがう')}</button>
+        <button class="big-btn no" data-action="cancelStudent">${rubyHtml('違', 'ちが')}う</button>
       </div>
     </div>
   `;
@@ -270,22 +283,27 @@ async function renderChildPage() {
   const histAll = await DB.getAllByIndex('history', 'studentId', student.id);
   const forgottenAssignments = new Set(histAll.filter(h => h.status === STATUS.FORGOTTEN).map(h => h.assignmentId));
 
+  const hasUntouched = todayRows.some(({ a, eff }) => eff === STATUS.NOT_SUBMITTED);
   const todayHtml = todayRows.length ? todayRows.map(({ a, eff }) => {
     const meta = STATUS_META[eff];
-    const clickable = eff !== STATUS.SUBMITTED && eff !== STATUS.EXEMPT;
+    const isPending = state.pending.has(a.id);
+    const clickable = isPending || (eff !== STATUS.SUBMITTED && eff !== STATUS.EXEMPT);
     return `<li class="item-row ${meta.cls}" ${clickable ? `data-action="openItemSheet" data-assignment="${a.id}"` : `data-action="alreadyDone"`}>
       <span class="item-icon">${meta.icon}</span>
       <span class="item-name">${itemNameHtml(a)}</span>
       <span class="item-status">${childLabel(eff)}</span>
     </li>`;
-  }).join('') : '<li class="empty-row">' + rubyHtml('今日はありません', 'きょうはありません') + '</li>';
+  }).join('') : `<li class="empty-row">${rubyHtml('今日', 'きょう')}はありません</li>`;
+  const bulkButtonHtml = hasUntouched
+    ? `<button class="mini-btn primary" data-action="markAllSubmitted" style="margin-bottom:10px;">${rubyHtml('全部', 'ぜんぶ')}${rubyHtml('出', 'だ')}せた</button>`
+    : '';
 
   const redoHtml = redoRows.length ? redoRows.map(({ a, st }) => {
     const waiting = st.status === STATUS.RESUBMIT_WAIT;
     return `<li class="item-row ${waiting ? 'st-wait' : 'st-redo'}" data-action="${waiting ? 'redoInfo' : 'openRedoSheet'}" data-assignment="${a.id}">
       <span class="item-icon">${waiting ? '→' : '★'}</span>
       <span class="item-name">${itemNameHtml(a)}</span>
-      <span class="item-status">${waiting ? childLabel(STATUS.RESUBMIT_WAIT) : rubyHtml('直してね', 'なおしてね')}</span>
+      <span class="item-status">${waiting ? childLabel(STATUS.RESUBMIT_WAIT) : rubyHtml('直', 'なお') + 'してね'}</span>
     </li>`;
   }).join('') : '<li class="empty-row">ありません</li>';
 
@@ -301,27 +319,28 @@ async function renderChildPage() {
       <div class="child-header">${student.number}${rubyHtml('番', 'ばん')} ${rubyHtml(student.name, student.kana)}${rubyHtml('さん', '')}</div>
 
       <section class="card">
-        <h2>${rubyHtml('今出すもの', 'いまだすもの')}</h2>
+        <h2>${rubyHtml('今', 'いま')}${rubyHtml('出', 'だ')}すもの</h2>
+        ${bulkButtonHtml}
         <ul class="item-list">${todayHtml}</ul>
       </section>
 
       <section class="card">
-        <h2>${rubyHtml('直すもの', 'なおすもの')}</h2>
+        <h2>${rubyHtml('直', 'なお')}すもの</h2>
         <ul class="item-list">${redoHtml}</ul>
       </section>
 
       <section class="card">
-        <h2>${rubyHtml('後で出すもの', 'あとでだすもの')}</h2>
+        <h2>${rubyHtml('後', 'あと')}で${rubyHtml('出', 'だ')}すもの</h2>
         <ul class="item-list">${laterHtml}</ul>
       </section>
 
       <section class="card small">
-        <h2>${rubyHtml('これまでの様子', 'これまでのようす')}</h2>
-        <p>${rubyHtml('出せた', 'だせた')}　${submittedCount}${rubyHtml('回', 'かい')}</p>
-        <p>${rubyHtml('忘れた', 'わすれた')}　${forgottenAssignments.size}${rubyHtml('回', 'かい')}</p>
+        <h2>これまでの${rubyHtml('様子', 'ようす')}</h2>
+        <p>${rubyHtml('出', 'だ')}せた　${submittedCount}${rubyHtml('回', 'かい')}</p>
+        <p>${rubyHtml('忘', 'わす')}れた　${forgottenAssignments.size}${rubyHtml('回', 'かい')}</p>
       </section>
 
-      <button class="finish-btn" data-action="finishChild">${rubyHtml('終わったら ここを押す', 'おわったら ここをおす')}</button>
+      <button class="finish-btn" data-action="finishChild">${rubyHtml('登録', 'とうろく')}する</button>
     </div>
   `;
   resetInactivityTimer();
@@ -341,14 +360,26 @@ function closeModal() {
   if (el) el.remove();
 }
 
-function openUnconfirmedWarning(items) {
-  const names = items.map(a => escapeHtml(a.item.name)).join('・');
+async function openConfirmSheet(untouched) {
+  const allAssignments = await getAllAssignmentsWithItems();
+  const assignmentMap = Object.fromEntries(allAssignments.map(a => [a.id, a]));
+  const rows = [...state.pending.entries()];
+  const pendingHtml = rows.length
+    ? rows.map(([id, p]) => {
+      const a = assignmentMap[id];
+      return `<li>${a ? escapeHtml(a.item.name) : ''}：${childLabel(p.status)}</li>`;
+    }).join('')
+    : `<li>${rubyHtml('変更', 'へんこう')}なし</li>`;
+  const untouchedHtml = untouched.length
+    ? `<p style="color:var(--bad);">${rubyHtml('まだ確認', 'まだかくにん')}していません：${untouched.map(a => escapeHtml(a.item.name)).join('・')}</p>`
+    : '';
   renderModal(`
-    <h3>${rubyHtml('まだ確認していないものがあります', 'まだかくにんしていないものがあります')}</h3>
-    <p>${names}</p>
+    <h3>${rubyHtml('登録', 'とうろく')}の${rubyHtml('確認', 'かくにん')}</h3>
+    <ul style="text-align:left;">${pendingHtml}</ul>
+    ${untouchedHtml}
     <div class="sheet-buttons">
       <button class="big-btn cancel" data-action="closeModal">${rubyHtml('もどる', '')}</button>
-      <button class="big-btn yes" data-action="forceFinishChild">${rubyHtml('このまま終わる', 'このままおわる')}</button>
+      <button class="big-btn yes" data-action="confirmRegister">これで${rubyHtml('登録', 'とうろく')}する</button>
     </div>
   `);
 }
@@ -357,12 +388,12 @@ async function openItemSheet(assignmentId) {
   const st = await getStatus(state.studentId, assignmentId);
   const eff = effectiveStatus(assignmentId, st.status);
   const thirdButton = eff === STATUS.FORGOTTEN
-    ? `<button class="big-btn plan" data-action="openPlanSheet" data-assignment="${assignmentId}">${rubyHtml('予定日を決める', 'よていびをきめる')}</button>`
-    : `<button class="big-btn" data-action="markForgottenPending" data-assignment="${assignmentId}">${rubyHtml('忘れた', 'わすれた')}</button>`;
+    ? `<button class="big-btn plan" data-action="openPlanSheet" data-assignment="${assignmentId}">${rubyHtml('予定日', 'よていび')}を${rubyHtml('決', 'き')}め${rubyHtml('直', 'なお')}す</button>`
+    : `<button class="big-btn" data-action="openPlanSheet" data-assignment="${assignmentId}">${rubyHtml('忘', 'わす')}れた</button>`;
   renderModal(`
     <h3>${rubyHtml('どうする？', '')}</h3>
     <div class="sheet-buttons">
-      <button class="big-btn yes" data-action="setChildStatus" data-status="${STATUS.SUBMITTED}" data-assignment="${assignmentId}">${rubyHtml('出せた', 'だせた')}</button>
+      <button class="big-btn yes" data-action="setChildStatus" data-status="${STATUS.SUBMITTED}" data-assignment="${assignmentId}">${rubyHtml('出', 'だ')}せた</button>
       <button class="big-btn" data-action="setChildStatus" data-status="${STATUS.IN_PROGRESS}" data-assignment="${assignmentId}">${rubyHtml('途中', 'とちゅう')}</button>
       ${thirdButton}
       <button class="big-btn cancel" data-action="closeModal">${rubyHtml('やめる', '')}</button>
@@ -371,13 +402,13 @@ async function openItemSheet(assignmentId) {
 }
 
 function openPlanSheet(assignmentId) {
-  const today = todayStr();
   renderModal(`
-    <h3>${rubyHtml('いつ出す？', '')}</h3>
+    <h3>いつ${rubyHtml('出', 'だ')}す？</h3>
     <div class="sheet-buttons">
       <button class="big-btn" data-action="setPlan" data-days="1" data-assignment="${assignmentId}">${rubyHtml('明日', 'あした')}</button>
       <button class="big-btn" data-action="setPlan" data-days="2" data-assignment="${assignmentId}">${rubyHtml('明後日', 'あさって')}</button>
       <button class="big-btn" data-action="setPlan" data-days="3" data-assignment="${assignmentId}">3${rubyHtml('日後', 'にちご')}</button>
+      <button class="big-btn" data-action="setPlanNone" data-assignment="${assignmentId}">${rubyHtml('日付', 'ひづけ')}は${rubyHtml('決', 'き')}めない</button>
       <button class="big-btn cancel" data-action="closeModal">${rubyHtml('やめる', '')}</button>
     </div>
   `);
@@ -395,9 +426,9 @@ function suggestDeadlineDefaults() {
 
 function openRedoSheet(assignmentId) {
   renderModal(`
-    <h3>${rubyHtml('直して出す？', 'なおしてだす')}</h3>
+    <h3>${rubyHtml('直', 'なお')}して${rubyHtml('出', 'だ')}す？</h3>
     <div class="sheet-buttons">
-      <button class="big-btn yes" data-action="resubmit" data-assignment="${assignmentId}">${rubyHtml('直して出した', 'なおしてだした')}</button>
+      <button class="big-btn yes" data-action="resubmit" data-assignment="${assignmentId}">${rubyHtml('直', 'なお')}して${rubyHtml('出', 'だ')}した</button>
       <button class="big-btn cancel" data-action="closeModal">${rubyHtml('やめる', '')}</button>
     </div>
   `);
@@ -428,19 +459,25 @@ function updatePinDisplay() {
   if (el) el.textContent = '●'.repeat(state.pinInput.length) + '–'.repeat(Math.max(0, 4 - state.pinInput.length));
 }
 
+let teacherHomeDate = null;
+
 async function renderTeacherHome() {
-  const todayList = await getTodayAssignments();
+  const targetDate = teacherHomeDate || todayStr();
+  const dateList = await getAssignmentsForDate(targetDate);
   const students = await getActiveStudents();
 
-  let unsubmittedCount = 0, redoCount = 0, overCount = 0;
+  let unsubmittedCount = 0, overCount = 0, confirmedCount = 0, targetCount = 0;
   const unsubmittedByStudent = new Map();
 
-  for (const a of todayList) {
+  for (const a of dateList) {
     if (!a.item) continue;
     const dl = deadlineState(a.deadline);
     for (const s of students) {
       const st = await getStatus(s.id, a.id);
-      if (![STATUS.SUBMITTED, STATUS.EXEMPT, STATUS.REDO, STATUS.RESUBMIT_WAIT].includes(st.status)) {
+      if (st.status === STATUS.EXEMPT) continue;
+      targetCount++;
+      if (st.status === STATUS.SUBMITTED) confirmedCount++;
+      if (![STATUS.SUBMITTED, STATUS.REDO, STATUS.RESUBMIT_WAIT].includes(st.status)) {
         unsubmittedCount++;
         if (!unsubmittedByStudent.has(s.id)) unsubmittedByStudent.set(s.id, { student: s, items: [] });
         unsubmittedByStudent.get(s.id).items.push({ a, st, dl });
@@ -451,7 +488,7 @@ async function renderTeacherHome() {
 
   const allAssignments = await getAllAssignmentsWithItems();
   const redoByStudent = new Map();
-  let submittedTotal = 0, targetTotal = 0;
+  let redoCount = 0;
   for (const a of allAssignments) {
     if (!a.item) continue;
     for (const s of students) {
@@ -461,16 +498,11 @@ async function renderTeacherHome() {
         if (!redoByStudent.has(s.id)) redoByStudent.set(s.id, { student: s, items: [] });
         redoByStudent.get(s.id).items.push({ a, st });
       }
-      if (st.status !== STATUS.EXEMPT) {
-        targetTotal++;
-        if (st.status === STATUS.SUBMITTED) submittedTotal++;
-      }
     }
   }
-  const overallRate = targetTotal > 0 ? Math.round((submittedTotal / targetTotal) * 100) : null;
 
   const unsubmittedHtml = [...unsubmittedByStudent.values()].map(({ student, items }) => `
-    <li class="t-row" data-action="openStudentQuick" data-id="${student.id}">
+    <li class="t-row" data-action="openStudentQuick" data-id="${student.id}" data-date="${targetDate}">
       <span class="t-num">${student.number}番</span>
       <span class="t-name">${escapeHtml(student.name)}</span>
       <span class="t-items">${items.map(i => itemNamePlain(i.a) + (i.dl ? deadlineBadge(i.a.deadline) : '')).join('・')}</span>
@@ -483,16 +515,20 @@ async function renderTeacherHome() {
       <span class="t-items">${items.map(i => `${itemNamePlain(i.a)}(${STATUS_META[i.st.status].label})`).join('・')}</span>
     </li>`).join('') || '<li class="empty-row">ありません</li>';
 
+  const isToday = targetDate === todayStr();
   app.innerHTML = `
     <div class="screen teacher-home">
       ${teacherNav('home')}
-      <h1>今日 ${formatDateJp(todayStr())}</h1>
+      <div class="form-row" style="margin-bottom:16px;">
+        <input type="date" id="homeDateInput" value="${targetDate}">
+        <button class="mini-btn" id="homeGotoTodayBtn">今日にする</button>
+        <span style="color:#666;">${formatDateJp(targetDate)}${isToday ? '＝今日' : ''}</span>
+      </div>
       <div class="summary-cards">
-        <div class="sum-card">提出物 ${todayList.filter(a => a.item).length}件</div>
+        <div class="sum-card">確認できた ${confirmedCount}/${targetCount}件</div>
         <div class="sum-card warn">未提出 ${unsubmittedCount}件</div>
         <div class="sum-card redo">直し ${redoCount}件</div>
         <div class="sum-card over">期限超過 ${overCount}件</div>
-        <div class="sum-card">学級の提出率 ${overallRate === null ? '－' : overallRate + '%'}</div>
       </div>
       <section class="card">
         <h2>未提出一覧</h2>
@@ -504,6 +540,14 @@ async function renderTeacherHome() {
       </section>
     </div>
   `;
+  document.getElementById('homeDateInput').addEventListener('change', (e) => {
+    teacherHomeDate = e.target.value || todayStr();
+    renderTeacherHome();
+  });
+  document.getElementById('homeGotoTodayBtn').addEventListener('click', () => {
+    teacherHomeDate = todayStr();
+    renderTeacherHome();
+  });
 }
 
 function teacherNav(active) {
@@ -523,13 +567,10 @@ function teacherNav(active) {
 async function renderTeacherStudents() {
   const students = (await DB.getAll('students')).sort((a, b) => a.number - b.number);
   const rows = students.map(s => `
-    <li class="t-row">
+    <li class="t-row compact">
       <span class="t-num">${s.number}番</span>
       <span class="t-name">${escapeHtml(s.name)}${s.active === false ? '（停止中）' : ''}</span>
-      <span class="t-items" style="font-family:monospace;">${s.code || '－'}</span>
-      <button class="mini-btn" data-action="openStudentDetail" data-id="${s.id}">詳細</button>
-      <button class="mini-btn" data-action="toggleStudentActive" data-id="${s.id}">${s.active === false ? '復帰' : '停止'}</button>
-      <button class="mini-btn danger" data-action="deleteStudent" data-id="${s.id}" data-name="${escapeHtml(s.name)}">削除</button>
+      <button class="mini-btn" data-action="openStudentActions" data-id="${s.id}">操作</button>
     </li>`).join('') || '<li class="empty-row">未登録</li>';
 
   app.innerHTML = `
@@ -549,7 +590,7 @@ async function renderTeacherStudents() {
       <section class="card">
         <h2>CSVで一括登録</h2>
         <p style="color:#666;font-size:0.9rem;">1行目は見出し、2行目以降に「出席番号,氏名,ふりがな」の順で入力してください（ふりがなは省略可）。</p>
-        <button class="mini-btn" id="downloadStudentTemplateBtn">テンプレをダウンロード</button>
+        <button class="mini-btn" id="downloadStudentTemplateBtn">テンプレートをダウンロード</button>
         <label class="mini-btn" style="display:inline-block;cursor:pointer;">
           CSVファイルを選ぶ
           <input type="file" id="studentCsvFile" accept=".csv,text/csv" style="display:none;">
@@ -580,7 +621,7 @@ async function renderTeacherStudents() {
     renderTeacherStudents();
   });
   document.getElementById('downloadStudentTemplateBtn').addEventListener('click', () => {
-    downloadCsv('名簿テンプレ.csv', [['出席番号', '氏名', 'ふりがな'], [1, '山田太郎', 'やまだたろう']]);
+    downloadCsv('名簿テンプレート.csv', [['出席番号', '氏名', 'ふりがな'], [1, '山田太郎', 'やまだたろう']]);
   });
   document.getElementById('studentCsvFile').addEventListener('change', async (e) => {
     const file = e.target.files[0];
@@ -633,6 +674,18 @@ async function renderTeacherStudents() {
   });
 }
 
+async function openItemActions(itemId, name) {
+  const i = await DB.get('items', itemId);
+  renderModal(`
+    <h3>${escapeHtml(name)}</h3>
+    <div class="sheet-buttons">
+      <button class="big-btn" data-action="toggleItemActive" data-id="${i.id}">${i.active === false ? '復帰させる' : '停止する'}</button>
+      <button class="big-btn cancel" data-action="deleteItem" data-id="${i.id}" data-name="${escapeHtml(name)}">削除する</button>
+      <button class="big-btn cancel" data-action="closeModal">閉じる</button>
+    </div>
+  `);
+}
+
 async function renderTeacherItems() {
   const items = await DB.getAll('items');
   const students = await getActiveStudents();
@@ -652,11 +705,10 @@ async function renderTeacherItems() {
     }
     const rate = target > 0 ? Math.round((submitted / target) * 100) : null;
     rowsArr.push(`
-    <li class="t-row">
+    <li class="t-row compact">
       <span class="t-name">${escapeHtml(i.name)}${i.active === false ? '（停止中）' : ''}</span>
-      <span class="t-items">${i.hasDeadline ? '期限あり　' : ''}提出率 ${rate === null ? '－' : rate + '%'}</span>
-      <button class="mini-btn" data-action="toggleItemActive" data-id="${i.id}">${i.active === false ? '復帰' : '停止'}</button>
-      <button class="mini-btn danger" data-action="deleteItem" data-id="${i.id}" data-name="${escapeHtml(i.name)}">削除</button>
+      <span class="t-items">${rate === null ? '－' : rate + '%'}</span>
+      <button class="mini-btn" data-action="openItemActions" data-id="${i.id}" data-name="${escapeHtml(i.name)}">操作</button>
     </li>`);
   }
   const rows = rowsArr.join('') || '<li class="empty-row">未登録</li>';
@@ -671,14 +723,13 @@ async function renderTeacherItems() {
         <form id="addItemForm" class="form-row">
           <input type="text" name="name" placeholder="提出物名" required>
           <input type="text" name="kana" placeholder="ふりがな（任意）">
-          <label><input type="checkbox" name="hasDeadline"> 期限を設定できる</label>
           <button type="submit" class="mini-btn primary">追加</button>
         </form>
       </section>
       <section class="card">
         <h2>CSVで一括登録</h2>
-        <p style="color:#666;font-size:0.9rem;">1行目は見出し、2行目以降に「提出物名,ふりがな,期限あり(1か0)」の順で入力してください（ふりがな・期限は省略可）。</p>
-        <button class="mini-btn" id="downloadItemTemplateBtn">テンプレをダウンロード</button>
+        <p style="color:#666;font-size:0.9rem;">1行目は見出し、2行目以降に「提出物名,ふりがな」の順で入力してください（ふりがなは省略可）。</p>
+        <button class="mini-btn" id="downloadItemTemplateBtn">テンプレートをダウンロード</button>
         <label class="mini-btn" style="display:inline-block;cursor:pointer;">
           CSVファイルを選ぶ
           <input type="file" id="itemCsvFile" accept=".csv,text/csv" style="display:none;">
@@ -692,13 +743,12 @@ async function renderTeacherItems() {
     const fd = new FormData(e.target);
     const name = String(fd.get('name')).trim();
     const kana = String(fd.get('kana') || '').trim();
-    const hasDeadline = !!fd.get('hasDeadline');
     if (!name) return;
-    await addItemLocal({ name, kana, hasDeadline, subject: '', memo: '', active: true });
+    await addItemLocal({ name, kana, subject: '', memo: '', active: true });
     renderTeacherItems();
   });
   document.getElementById('downloadItemTemplateBtn').addEventListener('click', () => {
-    downloadCsv('提出物テンプレ.csv', [['提出物名', 'ふりがな', '期限あり(1か0)'], ['漢字ドリル', 'かんじどりる', '0']]);
+    downloadCsv('提出物テンプレート.csv', [['提出物名', 'ふりがな'], ['漢字ドリル', 'かんじどりる']]);
   });
   document.getElementById('itemCsvFile').addEventListener('change', async (e) => {
     const file = e.target.files[0];
@@ -710,9 +760,8 @@ async function renderTeacherItems() {
       for (const r of rows) {
         const name = (r[0] || '').trim();
         const kana = (r[1] || '').trim();
-        const hasDeadline = (r[2] || '').trim() === '1';
         if (!name) continue;
-        await addItemLocal({ name, kana, hasDeadline, subject: '', memo: '', active: true });
+        await addItemLocal({ name, kana, subject: '', memo: '', active: true });
         count++;
       }
       showToast(`${count}件 取り込みました`);
@@ -723,21 +772,26 @@ async function renderTeacherItems() {
   });
 }
 
+let teacherTodayDate = null;
+
 async function renderTeacherToday() {
+  const targetDate = teacherTodayDate || todayStr();
+  const isToday = targetDate === todayStr();
   const items = await getActiveItems();
-  const todayList = await getTodayAssignments();
-  const assignedItemIds = new Set(todayList.map(a => a.itemId));
-  const assignmentByItemId = Object.fromEntries(todayList.map(a => [a.itemId, a]));
+  const dateList = await getAssignmentsForDate(targetDate);
+  const assignedItemIds = new Set(dateList.map(a => a.itemId));
+  const assignmentByItemId = Object.fromEntries(dateList.map(a => [a.itemId, a]));
 
   const allAssignments = await DB.getAll('assignments');
-  const pastDates = [...new Set(allAssignments.map(a => a.date))].filter(d => d < todayStr()).sort();
+  const pastDates = [...new Set(allAssignments.map(a => a.date))].filter(d => d < targetDate).sort();
   const lastDate = pastDates[pastDates.length - 1];
-  const yesterdayItemIds = new Set(allAssignments.filter(a => a.date === lastDate).map(a => a.itemId));
+  const lastDateItemIds = new Set(allAssignments.filter(a => a.date === lastDate).map(a => a.itemId));
 
-  const weekday = new Date().getDay();
+  const weekday = new Date(targetDate + 'T00:00:00').getDay();
+  const weekdayNames = ['日', '月', '火', '水', '木', '金', '土'];
   const templates = await getMeta('weeklyTemplates', {});
   const templateItemIds = new Set(templates[weekday] || []);
-  const preCheckIds = templateItemIds.size ? templateItemIds : yesterdayItemIds;
+  const preCheckIds = templateItemIds.size ? templateItemIds : lastDateItemIds;
 
   const rows = items.map(i => {
     if (assignedItemIds.has(i.id)) {
@@ -748,47 +802,93 @@ async function renderTeacherToday() {
       <span class="tag-added">追加済み</span>${a.deadline ? deadlineBadge(a.deadline) : ''}
       <button class="mini-btn" data-action="openItemRoster" data-assignment="${a.id}">一人ひとりを確認</button>
       <button class="mini-btn" data-action="editAssignment" data-assignment="${a.id}">編集</button>
-      <button class="mini-btn danger" data-action="removeTodayAssignment" data-assignment="${a.id}" data-name="${escapeHtml(i.name)}">今日から外す</button>
+      <button class="mini-btn danger" data-action="removeTodayAssignment" data-assignment="${a.id}" data-name="${escapeHtml(i.name)}">この日から外す</button>
     </li>`;
     }
     return `
     <li class="t-row">
-      <label style="display:flex;align-items:center;gap:8px;flex:1;">
+      <label style="display:flex;align-items:center;gap:8px;">
         <input type="checkbox" class="today-check" value="${i.id}" ${preCheckIds.has(i.id) ? 'checked' : ''}>
         <span>${escapeHtml(i.name)}</span>
       </label>
+      <input type="text" class="today-detail" data-item="${i.id}" placeholder="詳細（例：12ページ）" style="flex:1;min-width:100px;padding:6px 8px;border:1px solid var(--border);border-radius:8px;">
     </li>`;
   }).join('') || '<li class="empty-row">提出物マスタがありません</li>';
+
+  const weekdayOptions = weekdayNames.map((n, i) => `<option value="${i}" ${i === weekday ? 'selected' : ''}>${n}曜日</option>`).join('');
+  const templateChecks = items.map(i => `
+    <li class="t-row">
+      <label style="display:flex;align-items:center;gap:8px;">
+        <input type="checkbox" class="tmpl-check" value="${i.id}" ${templateItemIds.has(i.id) ? 'checked' : ''}>
+        <span>${escapeHtml(i.name)}</span>
+      </label>
+    </li>`).join('') || '<li class="empty-row">提出物マスタがありません</li>';
 
   app.innerHTML = `
     <div class="screen teacher-page">
       ${teacherNav('today')}
-      <h1>今日の提出物 (${formatDateJp(todayStr())})</h1>
+      <h1>提出物の登録</h1>
+      <div class="form-row" style="margin-bottom:16px;">
+        <input type="date" id="targetDateInput" value="${targetDate}">
+        <button class="mini-btn" id="gotoTodayBtn">今日にする</button>
+        <span style="color:#666;">${formatDateJp(targetDate)}（${weekdayNames[weekday]}）${isToday ? '＝今日' : ''}</span>
+      </div>
       <ul class="t-list">${rows}</ul>
       <section class="card">
-        <p style="color:#666;font-size:0.9rem;">チェックは、この曜日のテンプレ（設定していれば）または前回の登録日と同じものが最初から入っています。必要に応じて変えてから追加してください。</p>
-        <button class="mini-btn primary" id="applyCheckedBtn">チェックしたものを今日に追加</button>
-        <div style="margin-top:8px;">
-          <button class="mini-btn" id="saveTemplateBtn">今日の内容をこの曜日のテンプレとして保存</button>
+        <p style="color:#666;font-size:0.9rem;">チェックは、この曜日のテンプレート（設定していれば）または前回登録した日と同じものが最初から入っています。詳細（ページ・番号など）は任意で入力できます。</p>
+        <div style="margin-bottom:8px;">
+          <button class="mini-btn" id="checkAllBtn">すべて選択</button>
+          <button class="mini-btn" id="uncheckAllBtn">すべて解除</button>
         </div>
+        <button class="mini-btn primary" id="applyCheckedBtn">チェックしたものをこの日に追加</button>
+      </section>
+      <section class="card">
+        <h2>曜日ごとのテンプレート</h2>
+        <p style="color:#666;font-size:0.9rem;">曜日を選んで、その曜日にいつも出す提出物を登録しておけます。</p>
+        <select id="tmplWeekdaySelect" style="padding:8px;border-radius:8px;border:1px solid var(--border);margin-bottom:10px;">${weekdayOptions}</select>
+        <ul class="t-list" id="tmplCheckList">${templateChecks}</ul>
+        <button class="mini-btn primary" id="saveTemplateBtn">このテンプレートを保存</button>
       </section>
     </div>
   `;
-  document.getElementById('applyCheckedBtn').addEventListener('click', async () => {
-    const checked = [...document.querySelectorAll('.today-check:checked')].map(el => Number(el.value));
-    for (const itemId of checked) {
-      const item = items.find(i => i.id === itemId);
-      await addAssignmentLocal({ date: todayStr(), itemId, deadline: null, detail: '' });
-    }
-    showToast(`${checked.length}件 追加しました`);
+  document.getElementById('targetDateInput').addEventListener('change', (e) => {
+    teacherTodayDate = e.target.value || todayStr();
     renderTeacherToday();
   });
-  document.getElementById('saveTemplateBtn').addEventListener('click', async () => {
-    const ids = [...await getTodayAssignments()].map(a => a.itemId);
+  document.getElementById('gotoTodayBtn').addEventListener('click', () => {
+    teacherTodayDate = todayStr();
+    renderTeacherToday();
+  });
+  document.getElementById('checkAllBtn').addEventListener('click', () => {
+    document.querySelectorAll('.today-check').forEach(el => { el.checked = true; });
+  });
+  document.getElementById('uncheckAllBtn').addEventListener('click', () => {
+    document.querySelectorAll('.today-check').forEach(el => { el.checked = false; });
+  });
+  document.getElementById('applyCheckedBtn').addEventListener('click', async () => {
+    const checkedEls = [...document.querySelectorAll('.today-check:checked')];
+    for (const el of checkedEls) {
+      const itemId = Number(el.value);
+      const detailInput = document.querySelector(`.today-detail[data-item="${itemId}"]`);
+      const detail = detailInput ? detailInput.value.trim() : '';
+      await addAssignmentLocal({ date: targetDate, itemId, deadline: null, detail });
+    }
+    showToast(`${checkedEls.length}件 追加しました`);
+    renderTeacherToday();
+  });
+  document.getElementById('tmplWeekdaySelect').addEventListener('change', async (e) => {
+    const wd = Number(e.target.value);
     const t = await getMeta('weeklyTemplates', {});
-    t[weekday] = ids;
+    const ids = new Set(t[wd] || []);
+    document.querySelectorAll('.tmpl-check').forEach(el => { el.checked = ids.has(Number(el.value)); });
+  });
+  document.getElementById('saveTemplateBtn').addEventListener('click', async () => {
+    const wd = Number(document.getElementById('tmplWeekdaySelect').value);
+    const ids = [...document.querySelectorAll('.tmpl-check:checked')].map(el => Number(el.value));
+    const t = await getMeta('weeklyTemplates', {});
+    t[wd] = ids;
     await setMeta('weeklyTemplates', t);
-    showToast('この曜日のテンプレとして保存しました');
+    showToast(`${weekdayNames[wd]}曜日のテンプレートを保存しました`);
   });
 }
 
@@ -802,8 +902,12 @@ function openAssignmentEditSheet(assignment, itemName) {
     <div style="text-align:left;">
       <label style="display:block;margin:10px 0 4px;">詳細（例：12ページ、3番）</label>
       <input type="text" id="editDetailInput" value="${escapeHtml(assignment.detail || '')}" style="width:100%;padding:10px;border:1px solid var(--border);border-radius:8px;">
-      <label style="display:block;margin:14px 0 4px;">期限（空欄で期限なし）</label>
+      <label style="display:block;margin:14px 0 4px;">期限</label>
       <input type="datetime-local" id="editDeadlineInput" value="${currentVal}" min="${minVal}" placeholder="${defaultVal}" class="deadline-input">
+      <label style="display:flex;align-items:center;gap:6px;margin-top:8px;">
+        <input type="checkbox" id="editDeadlineClear" ${assignment.deadline ? '' : 'checked'}>
+        <span>期限なし</span>
+      </label>
     </div>
     <div class="sheet-buttons">
       <button class="big-btn yes" data-action="saveAssignmentEdit" data-assignment="${assignment.id}">保存</button>
@@ -1060,11 +1164,11 @@ async function importBackup(file) {
   }
 }
 
-function openStudentQuick(studentId) {
-  getTodayAssignments().then(async todayList => {
+function openStudentQuick(studentId, date) {
+  getAssignmentsForDate(date || todayStr()).then(async dateList => {
     const student = await DB.get('students', studentId);
     const rowsHtml = [];
-    for (const a of todayList) {
+    for (const a of dateList) {
       if (!a.item) continue;
       const st = await getStatus(studentId, a.id);
       const isSubmitted = st.status === STATUS.SUBMITTED;
@@ -1176,6 +1280,20 @@ async function computeStudentStats(studentId) {
   return { unresolved, redo, planned, history, submittedCount, totalCount, lateCount, forgottenCount: forgottenSet.size, rate };
 }
 
+async function openStudentActions(studentId) {
+  const s = await DB.get('students', studentId);
+  renderModal(`
+    <h3>${s.number}番 ${escapeHtml(s.name)}さん</h3>
+    <p style="color:#666;">コード：<span style="font-family:monospace;">${escapeHtml(s.code || '－')}</span></p>
+    <div class="sheet-buttons">
+      <button class="big-btn" data-action="openStudentDetail" data-id="${s.id}">詳細を見る</button>
+      <button class="big-btn" data-action="toggleStudentActive" data-id="${s.id}">${s.active === false ? '復帰させる' : '停止する'}</button>
+      <button class="big-btn cancel" data-action="deleteStudent" data-id="${s.id}" data-name="${escapeHtml(s.name)}">削除する</button>
+      <button class="big-btn cancel" data-action="closeModal">閉じる</button>
+    </div>
+  `);
+}
+
 async function openStudentDetail(studentId) {
   const student = await DB.get('students', studentId);
   const stats = await computeStudentStats(studentId);
@@ -1232,7 +1350,7 @@ async function handleAction(action, ds) {
       return;
     case 'confirmStudent':
       state.studentId = state.pendingStudentId;
-      state.pendingForgotten = new Set();
+      state.pending = new Map();
       goto('childPage');
       return;
     case 'cancelStudent':
@@ -1246,17 +1364,17 @@ async function handleAction(action, ds) {
         const st = await getStatus(state.studentId, a.id);
         if (effectiveStatus(a.id, st.status) === STATUS.NOT_SUBMITTED) untouched.push(a);
       }
-      if (untouched.length > 0) {
-        openUnconfirmedWarning(untouched);
+      if (state.pending.size === 0 && untouched.length === 0) {
+        goto('childSelect');
         return;
       }
-      await commitPendingForgotten();
-      goto('childSelect');
+      openConfirmSheet(untouched);
       return;
     }
-    case 'forceFinishChild':
-      await commitPendingForgotten();
+    case 'confirmRegister':
+      await commitPending();
       closeModal();
+      showToast('登録したよ！');
       goto('childSelect');
       return;
     case 'alreadyDone':
@@ -1279,18 +1397,21 @@ async function handleAction(action, ds) {
       return;
     case 'setChildStatus': {
       const assignmentId = Number(ds.assignment);
-      await setStatus(state.studentId, assignmentId, ds.status, 'child');
-      state.pendingForgotten.delete(assignmentId);
+      state.pending.set(assignmentId, { status: ds.status, plannedDate: null });
       closeModal();
-      showToast(ds.status === STATUS.SUBMITTED ? '提出できたよ！' : '登録したよ');
       renderChildPage();
       resetInactivityTimer();
       return;
     }
-    case 'markForgottenPending': {
-      const assignmentId = Number(ds.assignment);
-      state.pendingForgotten.add(assignmentId);
-      closeModal();
+    case 'markAllSubmitted': {
+      const todayList = await getTodayAssignments();
+      for (const a of todayList) {
+        if (!a.item) continue;
+        const st = await getStatus(state.studentId, a.id);
+        if (effectiveStatus(a.id, st.status) === STATUS.NOT_SUBMITTED) {
+          state.pending.set(a.id, { status: STATUS.SUBMITTED, plannedDate: null });
+        }
+      }
       renderChildPage();
       resetInactivityTimer();
       return;
@@ -1299,10 +1420,16 @@ async function handleAction(action, ds) {
       const assignmentId = Number(ds.assignment);
       const days = Number(ds.days);
       const plannedDate = addDays(todayStr(), days);
-      await setStatus(state.studentId, assignmentId, STATUS.FORGOTTEN, 'child', plannedDate);
-      state.pendingForgotten.delete(assignmentId);
+      state.pending.set(assignmentId, { status: STATUS.FORGOTTEN, plannedDate });
       closeModal();
-      showToast('予定を知らせたよ');
+      renderChildPage();
+      resetInactivityTimer();
+      return;
+    }
+    case 'setPlanNone': {
+      const assignmentId = Number(ds.assignment);
+      state.pending.set(assignmentId, { status: STATUS.FORGOTTEN, plannedDate: null });
+      closeModal();
       renderChildPage();
       resetInactivityTimer();
       return;
@@ -1349,7 +1476,7 @@ async function handleAction(action, ds) {
       renderTeacherByTab();
       return;
     case 'openStudentQuick':
-      openStudentQuick(Number(ds.id));
+      openStudentQuick(Number(ds.id), ds.date);
       return;
     case 'openRedoQuick':
       openRedoQuick(Number(ds.id));
@@ -1369,7 +1496,8 @@ async function handleAction(action, ds) {
     case 'saveAssignmentEdit': {
       const a = await DB.get('assignments', Number(ds.assignment));
       const detail = document.getElementById('editDetailInput').value.trim();
-      const deadlineInput = document.getElementById('editDeadlineInput').value;
+      const clearDeadline = document.getElementById('editDeadlineClear').checked;
+      const deadlineInput = clearDeadline ? '' : document.getElementById('editDeadlineInput').value;
       if (deadlineInput && new Date(deadlineInput) < new Date()) {
         alert('今より前の時刻は設定できません');
         return;
@@ -1409,24 +1537,33 @@ async function handleAction(action, ds) {
         renderTeacherHome();
       }
       return;
+    case 'openStudentActions':
+      openStudentActions(Number(ds.id));
+      return;
     case 'toggleStudentActive': {
       const st = await DB.get('students', Number(ds.id));
       st.active = st.active === false ? true : false;
       await DB.put('students', st);
+      closeModal();
       renderTeacherStudents();
       return;
     }
+    case 'openItemActions':
+      openItemActions(Number(ds.id), ds.name);
+      return;
     case 'toggleItemActive': {
       const it = await DB.get('items', Number(ds.id));
       it.active = it.active === false ? true : false;
       await DB.put('items', it);
       Sync.pushItem(it);
+      closeModal();
       renderTeacherItems();
       return;
     }
     case 'deleteStudent': {
       if (!confirm(`${ds.name}さんを削除します。提出履歴もすべて削除され、元に戻せません。よろしいですか？`)) return;
       await deleteStudentCascade(Number(ds.id));
+      closeModal();
       showToast('削除しました');
       renderTeacherStudents();
       return;
@@ -1434,6 +1571,7 @@ async function handleAction(action, ds) {
     case 'deleteItem': {
       if (!confirm(`「${ds.name}」を削除します。関連する提出履歴もすべて削除され、元に戻せません。よろしいですか？`)) return;
       await deleteItemCascade(Number(ds.id));
+      closeModal();
       showToast('削除しました');
       renderTeacherItems();
       return;

@@ -57,29 +57,21 @@ export function isKanaOrPlain(s) {
 }
 
 // 氏名入力欄からふりがな欄を自動入力する。
-// ・ひらがな/カタカナ/数字だけの入力はそのままひらがなに変換して反映
-// ・漢字入力は、IME変換前の読み(compositionupdateイベント)を可能な範囲で拾う(確実ではないベストエフォート)
+// ・ひらがな/カタカナ/数字だけの入力は、そのままひらがなに変換して反映(毎回、現在の入力全体を見て反映するので途中で止まらない)
+// ・漢字を含む場合は自動反映しない(手入力してもらう)
 // ・ふりがな欄をユーザーが自分で編集したら、以降は自動上書きしない
 export function attachFuriganaAutofill(nameInput, kanaInput) {
   let userEdited = false;
-  let lastComposition = '';
   kanaInput.addEventListener('input', () => { userEdited = true; });
-  nameInput.addEventListener('compositionupdate', (e) => {
-    lastComposition = e.data || '';
-  });
-  nameInput.addEventListener('compositionend', () => {
-    lastComposition = '';
-  });
-  nameInput.addEventListener('input', () => {
+  const sync = () => {
     if (userEdited) return;
     const val = nameInput.value;
     if (val && isKanaOrPlain(val)) {
       kanaInput.value = katakanaToHiragana(val);
-    } else if (lastComposition && /^[ぁ-ゖァ-ヶー]*$/.test(lastComposition)) {
-      // 変換直前のひらがな/カタカナを暫定表示(確定後に手直しできる)
-      kanaInput.value = katakanaToHiragana(lastComposition);
     }
-  });
+  };
+  nameInput.addEventListener('input', sync);
+  nameInput.addEventListener('compositionend', sync);
 }
 
 export function uid() {
