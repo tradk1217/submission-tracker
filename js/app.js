@@ -1284,12 +1284,32 @@ async function openStudentActions(studentId) {
   const s = await DB.get('students', studentId);
   renderModal(`
     <h3>${s.number}番 ${escapeHtml(s.name)}さん</h3>
+    <p style="color:#666;">ふりがな：${s.kana ? escapeHtml(s.kana) : '（未設定）'}</p>
     <p style="color:#666;">コード：<span style="font-family:monospace;">${escapeHtml(s.code || '－')}</span></p>
     <div class="sheet-buttons">
+      <button class="big-btn" data-action="openEditStudentSheet" data-id="${s.id}">編集する</button>
       <button class="big-btn" data-action="openStudentDetail" data-id="${s.id}">詳細を見る</button>
       <button class="big-btn" data-action="toggleStudentActive" data-id="${s.id}">${s.active === false ? '復帰させる' : '停止する'}</button>
       <button class="big-btn cancel" data-action="deleteStudent" data-id="${s.id}" data-name="${escapeHtml(s.name)}">削除する</button>
       <button class="big-btn cancel" data-action="closeModal">閉じる</button>
+    </div>
+  `);
+}
+
+function openEditStudentSheet(s) {
+  renderModal(`
+    <h3>${escapeHtml(s.name)}さんを編集</h3>
+    <div style="text-align:left;">
+      <label style="display:block;margin:10px 0 4px;">出席番号</label>
+      <input type="number" id="editStudentNumber" value="${s.number}" style="width:100%;padding:10px;border:1px solid var(--border);border-radius:8px;">
+      <label style="display:block;margin:10px 0 4px;">氏名</label>
+      <input type="text" id="editStudentName" value="${escapeHtml(s.name)}" style="width:100%;padding:10px;border:1px solid var(--border);border-radius:8px;">
+      <label style="display:block;margin:10px 0 4px;">ふりがな</label>
+      <input type="text" id="editStudentKana" value="${escapeHtml(s.kana || '')}" style="width:100%;padding:10px;border:1px solid var(--border);border-radius:8px;">
+    </div>
+    <div class="sheet-buttons">
+      <button class="big-btn yes" data-action="saveStudentEdit" data-id="${s.id}">保存</button>
+      <button class="big-btn cancel" data-action="closeModal">やめる</button>
     </div>
   `);
 }
@@ -1540,6 +1560,26 @@ async function handleAction(action, ds) {
     case 'openStudentActions':
       openStudentActions(Number(ds.id));
       return;
+    case 'openEditStudentSheet': {
+      const s = await DB.get('students', Number(ds.id));
+      openEditStudentSheet(s);
+      return;
+    }
+    case 'saveStudentEdit': {
+      const s = await DB.get('students', Number(ds.id));
+      const number = Number(document.getElementById('editStudentNumber').value);
+      const name = document.getElementById('editStudentName').value.trim();
+      const kana = document.getElementById('editStudentKana').value.trim();
+      if (!name || !Number.isFinite(number)) return;
+      s.number = number;
+      s.name = name;
+      s.kana = kana;
+      await DB.put('students', s);
+      closeModal();
+      showToast('変更しました');
+      renderTeacherStudents();
+      return;
+    }
     case 'toggleStudentActive': {
       const st = await DB.get('students', Number(ds.id));
       st.active = st.active === false ? true : false;
