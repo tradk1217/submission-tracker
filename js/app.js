@@ -569,7 +569,7 @@ async function renderTeacherStudents() {
   const rows = students.map(s => `
     <li class="t-row compact">
       <span class="t-num">${s.number}番</span>
-      <span class="t-name">${escapeHtml(s.name)}${s.active === false ? '（停止中）' : ''}</span>
+      <span class="t-name">${rubyHtml(s.name, s.kana)}${s.active === false ? '（停止中）' : ''}</span>
       <button class="mini-btn" data-action="openStudentActions" data-id="${s.id}">操作</button>
     </li>`).join('') || '<li class="empty-row">未登録</li>';
 
