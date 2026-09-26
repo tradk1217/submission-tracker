@@ -119,7 +119,7 @@ function showToast(msg) {
 function showCelebration() {
   const el = document.createElement('div');
   el.className = 'celebration-overlay';
-  el.innerHTML = `<div class="celebration-box">🎉<br>${rubyHtml('全部', 'ぜんぶ')}${rubyHtml('出', 'だ')}せたね！<br>すごい！</div>`;
+  el.innerHTML = `<div class="celebration-box">🎉<br>${rubyHtml('全部', 'ぜんぶ')}${rubyHtml('出', 'だ')}せたね！<br>えらい！</div>`;
   document.body.appendChild(el);
   requestAnimationFrame(() => el.classList.add('show'));
   el.addEventListener('click', () => { el.classList.remove('show'); setTimeout(() => el.remove(), 300); });
@@ -324,7 +324,7 @@ async function renderChildPage() {
     <li class="item-row st-mid" data-action="openItemSheet" data-assignment="${a.id}">
       <span class="item-icon">△</span>
       <span class="item-name">${itemNameHtml(a)}</span>
-      <span class="item-status">${formatDateJp(st.plannedDate)}まで</span>
+      <span class="item-status">${formatDateTimeJp(st.plannedDate)}まで</span>
     </li>`).join('') : '<li class="empty-row">ありません</li>';
 
   app.innerHTML = `
@@ -425,15 +425,49 @@ function openPlanSheet(assignmentId, targetStatus) {
   const buttons = options.map(o => {
     const date = addDays(todayStr(), o.days);
     const wd = weekdayNames[new Date(date + 'T00:00:00').getDay()];
-    return `<button class="big-btn" data-action="setPlan" data-days="${o.days}" data-status="${targetStatus}" data-assignment="${assignmentId}">${rubyHtml(o.label, o.kana)}　${formatDateJp(date)}(${wd})</button>`;
+    return `<button class="big-btn" data-action="pickPlanDate" data-date="${date}" data-status="${targetStatus}" data-assignment="${assignmentId}">${rubyHtml(o.label, o.kana)}　${formatDateJp(date)}(${wd})</button>`;
   }).join('');
   renderModal(`
     <h3>いつ${rubyHtml('出', 'だ')}す？</h3>
     <div class="sheet-buttons">
       ${buttons}
+      <button class="big-btn" data-action="openPlanCustomDate" data-status="${targetStatus}" data-assignment="${assignmentId}">${rubyHtml('自分', 'じぶん')}で${rubyHtml('選', 'えら')}ぶ</button>
       <button class="big-btn cancel" data-action="closeModal">${rubyHtml('やめる', '')}</button>
     </div>
   `);
+}
+
+function openPlanCustomDate(assignmentId, targetStatus) {
+  const minDate = todayStr();
+  renderModal(`
+    <h3>${rubyHtml('日付', 'ひづけ')}を${rubyHtml('選', 'えら')}ぶ</h3>
+    <input type="date" id="customPlanDate" min="${minDate}" value="${minDate}" class="deadline-input">
+    <div class="sheet-buttons">
+      <button class="big-btn yes" data-action="pickPlanDateCustom" data-status="${targetStatus}" data-assignment="${assignmentId}">${rubyHtml('次', 'つぎ')}へ</button>
+      <button class="big-btn cancel" data-action="closeModal">${rubyHtml('やめる', '')}</button>
+    </div>
+  `);
+}
+
+function openPlanTimeSheet(assignmentId, targetStatus, dateStr) {
+  const isToday = dateStr === todayStr();
+  const defaultTime = isToday ? '15:00' : '08:30';
+  const weekdayNames = ['日', '月', '火', '水', '木', '金', '土'];
+  const wd = weekdayNames[new Date(dateStr + 'T00:00:00').getDay()];
+  renderModal(`
+    <h3>${formatDateJp(dateStr)}(${wd}) ${rubyHtml('何時', 'なんじ')}まで？</h3>
+    <input type="time" id="customPlanTime" value="${defaultTime}" class="deadline-input">
+    <div class="sheet-buttons">
+      <button class="big-btn yes" data-action="setPlan" data-date="${dateStr}" data-status="${targetStatus}" data-assignment="${assignmentId}">${rubyHtml('決', 'き')}める</button>
+      <button class="big-btn cancel" data-action="closeModal">${rubyHtml('やめる', '')}</button>
+    </div>
+  `);
+}
+
+function localDateTimeToIso(dateStr, timeStr) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const [hh, mm] = timeStr.split(':').map(Number);
+  return new Date(y, m - 1, d, hh, mm, 0, 0).toISOString();
 }
 
 function suggestDeadlineDefaults() {
@@ -977,7 +1011,7 @@ async function renderTeacherSettings() {
         <h2>クラウド同期（複数端末をリアルタイムで揃える）</h2>
         <p style="color:#666;font-size:0.9rem;">児童の氏名・ふりがなは送信されません。送られるのはランダムなコードと、提出物・提出状況のみです。同期コードは合言葉のようなものなので、他人に教えないでください。</p>
         ${classroomId ? `
-          <p>同期コード：<strong style="font-family:monospace;font-size:1.1rem;">${escapeHtml(classroomId)}</strong>　${syncState.connected ? '<span style="color:var(--ok);">● 接続中</span>' : '<span style="color:var(--muted);">○ 未接続</span>'}</p>
+          <p>同期コード：<strong style="font-family:monospace;font-size:1.1rem;">${escapeHtml(classroomId)}</strong>　<button class="mini-btn" id="copyClassroomIdBtn" type="button">コピー</button>　${syncState.connected ? '<span style="color:var(--ok);">● 接続中</span>' : '<span style="color:var(--muted);">○ 未接続</span>'}</p>
           <p style="color:#666;font-size:0.85rem;">他の端末では、名簿画面で先に「名簿（コード付き）」を取り込んでから、この同期コードを入力するか、QRコードを読み取って参加してください。</p>
           <button class="mini-btn" id="showQrBtn">QRコードを表示</button>
           <button class="mini-btn danger" id="leaveSyncBtn">同期をやめる</button>
@@ -1027,6 +1061,17 @@ async function renderTeacherSettings() {
   const showQrBtn = document.getElementById('showQrBtn');
   if (showQrBtn) {
     showQrBtn.addEventListener('click', () => showJoinQr(classroomId));
+  }
+  const copyClassroomIdBtn = document.getElementById('copyClassroomIdBtn');
+  if (copyClassroomIdBtn) {
+    copyClassroomIdBtn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(classroomId);
+        showToast('コピーしました');
+      } catch (err) {
+        alert('コピーできませんでした。長押しして手動でコピーしてください。');
+      }
+    });
   }
   const startSyncBtn = document.getElementById('startSyncBtn');
   if (startSyncBtn) {
@@ -1513,7 +1558,7 @@ async function openStudentDetail(studentId) {
     <li class="item-row st-mid">
       <span class="item-icon">△</span>
       <span class="item-name">${itemNamePlain(a)}</span>
-      <span class="item-status">${formatDateJp(st.plannedDate)}まで</span>
+      <span class="item-status">${formatDateTimeJp(st.plannedDate)}まで</span>
     </li>`).join('') || '<li class="empty-row">なし</li>';
 
   const historyHtml = stats.history.slice(0, 30).map(h => {
@@ -1626,10 +1671,24 @@ async function handleAction(action, ds) {
       resetInactivityTimer();
       return;
     }
+    case 'pickPlanDate': {
+      openPlanTimeSheet(Number(ds.assignment), ds.status, ds.date);
+      return;
+    }
+    case 'openPlanCustomDate': {
+      openPlanCustomDate(Number(ds.assignment), ds.status);
+      return;
+    }
+    case 'pickPlanDateCustom': {
+      const dateVal = document.getElementById('customPlanDate').value;
+      if (!dateVal) return;
+      openPlanTimeSheet(Number(ds.assignment), ds.status, dateVal);
+      return;
+    }
     case 'setPlan': {
       const assignmentId = Number(ds.assignment);
-      const days = Number(ds.days);
-      const plannedDate = addDays(todayStr(), days);
+      const timeVal = document.getElementById('customPlanTime').value || '23:59';
+      const plannedDate = localDateTimeToIso(ds.date, timeVal);
       const status = ds.status || STATUS.FORGOTTEN;
       state.pending.set(assignmentId, { status, plannedDate });
       closeModal();
