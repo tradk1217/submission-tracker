@@ -819,7 +819,9 @@ async function renderTeacherToday() {
         <input type="checkbox" class="today-check" value="${i.id}" ${preCheckIds.has(i.id) ? 'checked' : ''}>
         <span>${escapeHtml(i.name)}</span>
       </label>
-      <input type="text" class="today-detail" data-item="${i.id}" placeholder="詳細（例：12ページ）" style="flex:1;min-width:100px;padding:6px 8px;border:1px solid var(--border);border-radius:8px;">
+      <input type="text" id="todayDetail_${i.id}" class="today-detail" data-item="${i.id}" placeholder="詳細（例：12ページ）" style="flex:1;min-width:100px;padding:6px 8px;border:1px solid var(--border);border-radius:8px;">
+      <button type="button" class="mini-btn" data-action="appendDetailWord" data-for="todayDetail_${i.id}" data-word="ページ">ページ</button>
+      <button type="button" class="mini-btn" data-action="appendDetailWord" data-for="todayDetail_${i.id}" data-word="番">番</button>
     </li>`;
   }).join('') || '<li class="empty-row">提出物マスタがありません</li>';
 
@@ -910,6 +912,10 @@ function openAssignmentEditSheet(assignment, itemName) {
     <div style="text-align:left;">
       <label style="display:block;margin:10px 0 4px;">詳細（例：12ページ、3番）</label>
       <input type="text" id="editDetailInput" value="${escapeHtml(assignment.detail || '')}" style="width:100%;padding:10px;border:1px solid var(--border);border-radius:8px;">
+      <div style="margin-top:6px;">
+        <button type="button" class="mini-btn" data-action="appendDetailWord" data-for="editDetailInput" data-word="ページ">ページ</button>
+        <button type="button" class="mini-btn" data-action="appendDetailWord" data-for="editDetailInput" data-word="番">番</button>
+      </div>
       <label style="display:block;margin:14px 0 4px;">期限</label>
       <input type="datetime-local" id="editDeadlineInput" value="${currentVal}" min="${minVal}" placeholder="${defaultVal}" class="deadline-input">
       <label style="display:flex;align-items:center;gap:6px;margin-top:8px;">
@@ -960,6 +966,7 @@ async function renderTeacherSettings() {
           <div class="form-row" style="margin-top:10px;">
             <input type="text" id="joinCodeInput" placeholder="他の端末の同期コードを入力" value="${escapeHtml(joinCodeToShow || '')}">
             <button class="mini-btn" id="joinSyncBtn">参加する</button>
+            <button class="mini-btn" id="scanSyncQrBtn">QRコードを読み取る</button>
           </div>
         `}
       </section>
@@ -1017,6 +1024,10 @@ async function renderTeacherSettings() {
       showToast('参加しました');
       renderTeacherSettings();
     });
+  }
+  const scanSyncQrBtn = document.getElementById('scanSyncQrBtn');
+  if (scanSyncQrBtn) {
+    scanSyncQrBtn.addEventListener('click', () => openQrScanner(handleScannedJoinCode));
   }
   const leaveSyncBtn = document.getElementById('leaveSyncBtn');
   if (leaveSyncBtn) {
@@ -1202,10 +1213,10 @@ function stopQrScanner() {
   }
 }
 
-async function openRosterQrScanner() {
+async function openQrScanner(onDecode, title) {
   renderModal(`
-    <h3>QRコードを読み取る</h3>
-    <p style="color:#666;font-size:0.9rem;">相手の端末に表示した名簿QRコードをカメラに映してください。</p>
+    <h3>${title || 'QRコードを読み取る'}</h3>
+    <p style="color:#666;font-size:0.9rem;">相手の端末に表示したQRコードをカメラに映してください。</p>
     <video id="qrVideo" playsinline muted style="width:100%;border-radius:12px;background:#000;"></video>
     <canvas id="qrCanvas" style="display:none;"></canvas>
     <p id="qrScanStatus" style="color:#666;min-height:1.2em;"></p>
@@ -1228,7 +1239,9 @@ async function openRosterQrScanner() {
         const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
         const code = window.jsQR(imageData.data, imageData.width, imageData.height);
         if (code && code.data) {
-          handleScannedRosterCsv(code.data);
+          stopQrScanner();
+          closeModal();
+          onDecode(code.data);
           return;
         }
       }
@@ -1241,9 +1254,11 @@ async function openRosterQrScanner() {
   }
 }
 
+function openRosterQrScanner() {
+  return openQrScanner(handleScannedRosterCsv, 'QRコードを読み取る');
+}
+
 async function handleScannedRosterCsv(text) {
-  stopQrScanner();
-  closeModal();
   try {
     const rows = parseCsv(text).slice(1);
     let count = 0;
@@ -1258,6 +1273,20 @@ async function handleScannedRosterCsv(text) {
     }
     showToast(`${count}件 取り込みました`);
     renderTeacherStudents();
+  } catch (err) {
+    alert('QRコードの内容を読み込めませんでした: ' + (err && err.message ? err.message : String(err)));
+  }
+}
+
+async function handleScannedJoinCode(text) {
+  try {
+    let code = text.trim();
+    const urlMatch = code.match(/[?&]join=([^&]+)/);
+    if (urlMatch) code = decodeURIComponent(urlMatch[1]);
+    if (!code) throw new Error('同期コードが見つかりませんでした');
+    await Sync.joinClassroom(code);
+    showToast('参加しました');
+    renderTeacherSettings();
   } catch (err) {
     alert('QRコードの内容を読み込めませんでした: ' + (err && err.message ? err.message : String(err)));
   }
@@ -1694,6 +1723,13 @@ async function handleAction(action, ds) {
     case 'openEditStudentSheet': {
       const s = await DB.get('students', Number(ds.id));
       openEditStudentSheet(s);
+      return;
+    }
+    case 'appendDetailWord': {
+      const input = document.getElementById(ds.for);
+      if (!input) return;
+      if (!input.value.endsWith(ds.word)) input.value += ds.word;
+      input.focus();
       return;
     }
     case 'saveStudentEdit': {
