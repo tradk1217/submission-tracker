@@ -223,8 +223,10 @@ html, body {
 
 .teacher-nav {
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  gap: 6px;
   margin: 0 -16px 20px;
   padding: 10px 16px;
   position: sticky;
@@ -234,6 +236,7 @@ html, body {
   border-bottom: 1px solid var(--border);
 }
 .nav-btn {
+  flex: 0 0 auto;
   padding: 10px 14px;
   border-radius: 10px;
   border: 1px solid var(--border);
@@ -268,9 +271,26 @@ html, body {
   border-bottom: 1px solid var(--border);
   font-size: 1rem;
 }
-.t-num { font-weight: bold; min-width: 50px; }
+.t-num { font-weight: bold; min-width: 50px; flex: 0 0 auto; }
 .t-name { min-width: 90px; }
 .t-items { color: var(--muted); flex: 1; }
+
+.t-row.compact {
+  flex-wrap: nowrap;
+}
+.t-row.compact .t-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.t-row.compact .t-items {
+  flex: 0 0 auto;
+}
+.t-row.compact .mini-btn {
+  flex: 0 0 auto;
+}
 
 .form-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .form-row input[type=text], .form-row input[type=number] {
