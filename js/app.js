@@ -1,5 +1,5 @@
 import { DB, getMeta, setMeta, ALL_STORES } from './db.js';
-import { todayStr, addDays, formatDateJp, formatDateTimeJp, deadlineState, rubyHtml, escapeHtml, parseCsv, downloadCsv, generateCode, uid, attachFuriganaAutofill } from './util.js';
+import { todayStr, addDays, formatDateJp, formatDateTimeJp, deadlineState, rubyHtml, escapeHtml, parseCsv, downloadCsv, toCsv, generateCode, uid, attachFuriganaAutofill } from './util.js';
 import * as Sync from './sync.js';
 
 const STATUS = {
@@ -356,6 +356,7 @@ function renderModal(html) {
 }
 
 function closeModal() {
+  stopQrScanner();
   const el = document.getElementById('modalOverlay');
   if (el) el.remove();
 }
@@ -600,11 +601,13 @@ async function renderTeacherStudents() {
         <h2>他の端末に名簿を揃える</h2>
         <p style="color:#666;font-size:0.9rem;">この端末の名簿（氏名＋コード）をCSVで書き出し、他の端末（iPhoneなど）で読み込むと、同じ児童に同じコードが割り当てられます。クラウド同期はこのコードを使って行うため、全端末でコードを揃えてください。このファイルには氏名が含まれるので、他人に渡さないでください。</p>
         <button class="mini-btn" id="exportStudentCodeCsvBtn">名簿（コード付き）を書き出す</button>
+        <button class="mini-btn" id="showRosterQrBtn">QRコードで表示</button>
         <div style="margin-top:8px;">
           <label class="mini-btn" style="display:inline-block;cursor:pointer;">
             名簿（コード付き）を読み込む
             <input type="file" id="studentCodeCsvFile" accept=".csv,text/csv" style="display:none;">
           </label>
+          <button class="mini-btn" id="scanRosterQrBtn">QRコードを読み取る</button>
         </div>
       </section>
     </div>
@@ -645,10 +648,15 @@ async function renderTeacherStudents() {
     }
   });
   document.getElementById('exportStudentCodeCsvBtn').addEventListener('click', async () => {
-    const list = (await DB.getAll('students')).sort((a, b) => a.number - b.number);
-    const rows = [['出席番号', '氏名', 'ふりがな', 'コード']];
-    for (const s of list) rows.push([s.number, s.name, s.kana || '', s.code || '']);
+    const rows = await rosterCodeRows();
     downloadCsv(`名簿コード付き_${todayStr()}.csv`, rows);
+  });
+  document.getElementById('showRosterQrBtn').addEventListener('click', async () => {
+    const rows = await rosterCodeRows();
+    showRosterQr(rows);
+  });
+  document.getElementById('scanRosterQrBtn').addEventListener('click', () => {
+    openRosterQrScanner();
   });
   document.getElementById('studentCodeCsvFile').addEventListener('change', async (e) => {
     const file = e.target.files[0];
@@ -1104,16 +1112,29 @@ async function exportTodayMatrixCsv() {
 
 let qrLibPromise = null;
 function loadQrLib() {
-  if (window.QRCode) return Promise.resolve();
+  if (window.QRCode && window.QRCode.toCanvas) return Promise.resolve();
   if (qrLibPromise) return qrLibPromise;
   qrLibPromise = new Promise((resolve, reject) => {
     const s = document.createElement('script');
-    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js';
+    s.src = 'https://cdn.jsdelivr.net/npm/qrcode/build/qrcode.min.js';
     s.onload = resolve;
     s.onerror = () => reject(new Error('QRコードの読み込みに失敗しました（インターネット接続が必要です）'));
     document.head.appendChild(s);
   });
   return qrLibPromise;
+}
+
+async function renderQrInto(holderEl, text, errorCorrectionLevel) {
+  await loadQrLib();
+  const canvas = document.createElement('canvas');
+  holderEl.innerHTML = '';
+  holderEl.appendChild(canvas);
+  await new Promise((resolve, reject) => {
+    window.QRCode.toCanvas(canvas, text, { width: 260, margin: 2, errorCorrectionLevel: errorCorrectionLevel || 'M' }, (err) => {
+      if (err) reject(err);
+      else resolve();
+    });
+  });
 }
 
 async function showJoinQr(classroomId) {
@@ -1125,10 +1146,120 @@ async function showJoinQr(classroomId) {
     <button class="big-btn cancel" data-action="closeModal">閉じる</button>
   `);
   try {
-    await loadQrLib();
-    new window.QRCode(document.getElementById('qrHolder'), { text: url, width: 220, height: 220 });
+    await renderQrInto(document.getElementById('qrHolder'), url);
   } catch (err) {
     document.getElementById('qrHolder').textContent = err.message;
+  }
+}
+
+let jsQrLibPromise = null;
+function loadJsQrLib() {
+  if (window.jsQR) return Promise.resolve();
+  if (jsQrLibPromise) return jsQrLibPromise;
+  jsQrLibPromise = new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js';
+    s.onload = resolve;
+    s.onerror = () => reject(new Error('カメラ読み取り機能の読み込みに失敗しました（インターネット接続が必要です）'));
+    document.head.appendChild(s);
+  });
+  return jsQrLibPromise;
+}
+
+async function rosterCodeRows() {
+  const list = (await DB.getAll('students')).sort((a, b) => a.number - b.number);
+  const rows = [['出席番号', '氏名', 'ふりがな', 'コード']];
+  for (const s of list) rows.push([s.number, s.name, s.kana || '', s.code || '']);
+  return rows;
+}
+
+async function showRosterQr(rows) {
+  const csv = toCsv(rows);
+  const byteLen = new TextEncoder().encode(csv).length;
+  renderModal(`
+    <h3>名簿のQRコード</h3>
+    <p style="color:#666;font-size:0.9rem;">他の端末で「QRコードを読み取る」を開いてこれを映すと、名簿（氏名・ふりがな・コード）をまとめて取り込めます。氏名が含まれるので、他人に見せないでください。</p>
+    ${byteLen > 2200 ? '<p style="color:var(--bad);font-size:0.9rem;">人数が多く、QRコードでは読み取れない可能性があります。うまくいかない場合はCSVファイルでの受け渡しをお使いください。</p>' : ''}
+    <div id="qrHolder" style="display:flex;justify-content:center;margin:16px 0;"></div>
+    <button class="big-btn cancel" data-action="closeModal">閉じる</button>
+  `);
+  try {
+    await renderQrInto(document.getElementById('qrHolder'), csv, 'L');
+  } catch (err) {
+    document.getElementById('qrHolder').textContent = 'QRコードを作れませんでした：' + err.message;
+  }
+}
+
+let qrScanStream = null;
+let qrScanRAF = null;
+
+function stopQrScanner() {
+  if (qrScanRAF) cancelAnimationFrame(qrScanRAF);
+  qrScanRAF = null;
+  if (qrScanStream) {
+    qrScanStream.getTracks().forEach(t => t.stop());
+    qrScanStream = null;
+  }
+}
+
+async function openRosterQrScanner() {
+  renderModal(`
+    <h3>QRコードを読み取る</h3>
+    <p style="color:#666;font-size:0.9rem;">相手の端末に表示した名簿QRコードをカメラに映してください。</p>
+    <video id="qrVideo" playsinline muted style="width:100%;border-radius:12px;background:#000;"></video>
+    <canvas id="qrCanvas" style="display:none;"></canvas>
+    <p id="qrScanStatus" style="color:#666;min-height:1.2em;"></p>
+    <button class="big-btn cancel" data-action="closeModal">やめる</button>
+  `);
+  try {
+    await loadJsQrLib();
+    const video = document.getElementById('qrVideo');
+    qrScanStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+    video.srcObject = qrScanStream;
+    await video.play();
+    const canvas = document.getElementById('qrCanvas');
+    const ctx = canvas.getContext('2d');
+    const tick = () => {
+      if (!document.getElementById('qrVideo')) return; // モーダルが閉じられた
+      if (video.readyState === video.HAVE_ENOUGH_DATA) {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const code = window.jsQR(imageData.data, imageData.width, imageData.height);
+        if (code && code.data) {
+          handleScannedRosterCsv(code.data);
+          return;
+        }
+      }
+      qrScanRAF = requestAnimationFrame(tick);
+    };
+    qrScanRAF = requestAnimationFrame(tick);
+  } catch (err) {
+    const statusEl = document.getElementById('qrScanStatus');
+    if (statusEl) statusEl.textContent = 'カメラを使えませんでした: ' + err.message;
+  }
+}
+
+async function handleScannedRosterCsv(text) {
+  stopQrScanner();
+  closeModal();
+  try {
+    const rows = parseCsv(text).slice(1);
+    let count = 0;
+    for (const r of rows) {
+      const number = Number(r[0]);
+      const name = (r[1] || '').trim();
+      const kana = (r[2] || '').trim();
+      const code = (r[3] || '').trim();
+      if (!name || !Number.isFinite(number) || !code) continue;
+      await DB.add('students', { number, name, kana, code, active: true });
+      count++;
+    }
+    showToast(`${count}件 取り込みました`);
+    renderTeacherStudents();
+  } catch (err) {
+    alert('QRコードの内容を読み込めませんでした: ' + (err && err.message ? err.message : String(err)));
   }
 }
 
