@@ -268,26 +268,27 @@ async function renderChildPage() {
   const student = await DB.get('students', state.studentId);
   if (!student) { goto('childSelect'); return; }
 
-  const todayList = await getTodayAssignments();
-  const todayRows = [];
-  for (const a of todayList) {
-    if (!a.item) continue;
-    const st = await getStatus(student.id, a.id);
-    const eff = effectiveStatus(a.id, st.status);
-    if (eff === STATUS.REDO || eff === STATUS.RESUBMIT_WAIT) continue;
-    todayRows.push({ a, st, eff });
-  }
-
+  const today = todayStr();
   const allAssignments = await getAllAssignmentsWithItems();
+  const todayRows = [];
   const redoRows = [];
   const laterRows = [];
   for (const a of allAssignments) {
     if (!a.item) continue;
     const st = await getStatus(student.id, a.id);
-    if (st.status === STATUS.REDO || st.status === STATUS.RESUBMIT_WAIT) {
+    const eff = effectiveStatus(a.id, st.status);
+    if (eff === STATUS.REDO || eff === STATUS.RESUBMIT_WAIT) {
       redoRows.push({ a, st });
-    } else if (st.plannedDate && st.status !== STATUS.SUBMITTED && st.status !== STATUS.EXEMPT) {
+      continue;
+    }
+    if (eff === STATUS.SUBMITTED || eff === STATUS.EXEMPT) continue;
+    if (st.plannedDate && eff !== STATUS.NOT_SUBMITTED) {
       laterRows.push({ a, st });
+      continue;
+    }
+    // 未着手（未提出のまま放置）は、今日の分に加えて過去の分も出し続ける（先送りされないように）。
+    if (a.date <= today) {
+      todayRows.push({ a, st, eff, overdue: a.date < today });
     }
   }
 
@@ -297,13 +298,14 @@ async function renderChildPage() {
   const forgottenAssignments = new Set(histAll.filter(h => h.status === STATUS.FORGOTTEN).map(h => h.assignmentId));
 
   const hasUntouched = todayRows.some(({ a, eff }) => eff === STATUS.NOT_SUBMITTED);
-  const todayHtml = todayRows.length ? todayRows.map(({ a, eff }) => {
+  const todayHtml = todayRows.length ? todayRows.map(({ a, eff, overdue }) => {
     const meta = STATUS_META[eff];
     const isPending = state.pending.has(a.id);
     const clickable = isPending || (eff !== STATUS.SUBMITTED && eff !== STATUS.EXEMPT);
+    const dateNote = overdue ? `<span class="dl-badge dl-over">${formatDateJp(a.date)}の${rubyHtml('分', 'ぶん')}</span>` : '';
     return `<li class="item-row ${meta.cls}" ${clickable ? `data-action="openItemSheet" data-assignment="${a.id}"` : `data-action="alreadyDone"`}>
       <span class="item-icon">${meta.icon}</span>
-      <span class="item-name">${itemNameHtml(a)}</span>
+      <span class="item-name">${itemNameHtml(a)}${dateNote}</span>
       <span class="item-status">${childLabel(eff)}</span>
     </li>`;
   }).join('') : `<li class="empty-row">${rubyHtml('今日', 'きょう')}はありません</li>`;
@@ -533,8 +535,10 @@ let teacherHomeDate = null;
 
 async function renderTeacherHome() {
   const targetDate = teacherHomeDate || todayStr();
+  const isToday = targetDate === todayStr();
   const dateList = await getAssignmentsForDate(targetDate);
   const students = await getActiveStudents();
+  const allAssignments = await getAllAssignmentsWithItems();
 
   let unsubmittedCount = 0, overCount = 0, confirmedCount = 0, targetCount = 0;
   const unsubmittedByStudent = new Map();
@@ -556,7 +560,23 @@ async function renderTeacherHome() {
     }
   }
 
-  const allAssignments = await getAllAssignmentsWithItems();
+  // 未着手のまま放置された過去分は、今日の画面でも見落とさないよう繰り越して表示する。
+  if (isToday) {
+    for (const a of allAssignments) {
+      if (!a.item || a.date >= targetDate) continue;
+      const dl = deadlineState(a.deadline);
+      for (const s of students) {
+        const st = await getStatus(s.id, a.id);
+        if (st.status !== STATUS.NOT_SUBMITTED || st.plannedDate) continue;
+        targetCount++;
+        unsubmittedCount++;
+        if (!unsubmittedByStudent.has(s.id)) unsubmittedByStudent.set(s.id, { student: s, items: [] });
+        unsubmittedByStudent.get(s.id).items.push({ a, st, dl, carried: true });
+        if (dl && dl.level === 'over') overCount++;
+      }
+    }
+  }
+
   const redoByStudent = new Map();
   let redoCount = 0;
   for (const a of allAssignments) {
@@ -575,7 +595,7 @@ async function renderTeacherHome() {
     <li class="t-row" data-action="openStudentQuick" data-id="${student.id}" data-date="${targetDate}">
       <span class="t-num">${student.number}番</span>
       <span class="t-name">${escapeHtml(student.name)}</span>
-      <span class="t-items">${items.map(i => itemNamePlain(i.a) + (i.dl ? deadlineBadge(i.a.deadline) : '')).join('・')}</span>
+      <span class="t-items">${items.map(i => itemNamePlain(i.a) + (i.carried ? `<span class="dl-badge dl-over">${formatDateJp(i.a.date)}の分</span>` : '') + (i.dl ? deadlineBadge(i.a.deadline) : '')).join('・')}</span>
     </li>`).join('') || '<li class="empty-row">未提出はありません</li>';
 
   const redoHtml = [...redoByStudent.values()].map(({ student, items }) => `
@@ -585,7 +605,6 @@ async function renderTeacherHome() {
       <span class="t-items">${items.map(i => `${itemNamePlain(i.a)}(${STATUS_META[i.st.status].label})`).join('・')}</span>
     </li>`).join('') || '<li class="empty-row">ありません</li>';
 
-  const isToday = targetDate === todayStr();
   app.innerHTML = `
     <div class="screen teacher-home">
       ${teacherNav('home')}
@@ -1461,16 +1480,26 @@ async function importBackup(file) {
 }
 
 function openStudentQuick(studentId, date) {
-  getAssignmentsForDate(date || todayStr()).then(async dateList => {
+  const targetDate = date || todayStr();
+  getAssignmentsForDate(targetDate).then(async dateList => {
     const student = await DB.get('students', studentId);
+    let items = dateList.map(a => ({ a, carried: false }));
+    if (targetDate === todayStr()) {
+      const all = await getAllAssignmentsWithItems();
+      for (const a of all) {
+        if (!a.item || a.date >= targetDate) continue;
+        const st = await getStatus(studentId, a.id);
+        if (st.status === STATUS.NOT_SUBMITTED && !st.plannedDate) items.push({ a, carried: true });
+      }
+    }
     const rowsHtml = [];
-    for (const a of dateList) {
+    for (const { a, carried } of items) {
       if (!a.item) continue;
       const st = await getStatus(studentId, a.id);
       const isSubmitted = st.status === STATUS.SUBMITTED;
       rowsHtml.push(`
         <div class="quick-item">
-          <div class="quick-item-name">${itemNamePlain(a)}（${STATUS_META[st.status].label}）</div>
+          <div class="quick-item-name">${itemNamePlain(a)}${carried ? `<span class="dl-badge dl-over">${formatDateJp(a.date)}の分</span>` : ''}（${STATUS_META[st.status].label}）</div>
           <div class="quick-item-actions">
             ${isSubmitted
               ? `<button class="mini-btn" data-action="teacherSetStatus" data-status="${STATUS.REDO}" data-assignment="${a.id}" data-student="${studentId}">直しにする</button>
