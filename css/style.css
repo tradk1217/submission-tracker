@@ -351,6 +351,58 @@ html, body {
 
 .empty { text-align: center; color: var(--muted); }
 
+/* ---- 提出物の登録：カレンダー ---- */
+.cal-nav, .day-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.day-title { font-size: 1.15rem; text-align: center; }
+.cal-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 4px;
+}
+.cal-head { text-align: center; font-size: 0.8rem; color: var(--muted); padding: 2px 0; }
+.cal-head.sun { color: var(--bad); }
+.cal-head.sat { color: var(--wait); }
+.cal-cell {
+  position: relative;
+  min-height: 46px;
+  padding: 4px 2px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: white;
+  font-size: 0.95rem;
+  color: var(--text);
+}
+.cal-cell.empty { border: none; background: none; }
+.cal-cell.off { background: #eceff2; color: var(--muted); }
+.cal-cell.today { border-color: var(--mid); border-width: 2px; }
+.cal-cell.selected { background: #2b6cb0; border-color: #2b6cb0; color: white; }
+.cal-num { display: block; }
+.cal-count {
+  display: inline-block;
+  margin-top: 2px;
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--ok);
+  color: white;
+  font-size: 0.75rem;
+  line-height: 18px;
+}
+.cal-cell.selected .cal-count { background: white; color: #2b6cb0; }
+.cal-legend { color: var(--muted); font-size: 0.8rem; margin: 8px 0 0; }
+
+.tmpl-scroll { overflow-x: auto; }
+.tmpl-table { border-collapse: collapse; width: 100%; }
+.tmpl-table th, .tmpl-table td { padding: 8px 4px; text-align: center; border-bottom: 1px solid var(--border); }
+.tmpl-table .tmpl-name { text-align: left; padding-left: 0; }
+.tmpl-table input[type=checkbox] { width: 22px; height: 22px; }
+
 @media (max-width: 480px) {
   .num-btn { font-size: 1.8rem; padding: 18px 0; }
   .confirm-name { font-size: 2rem; }
