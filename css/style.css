@@ -351,6 +351,10 @@ html, body {
 
 .empty { text-align: center; color: var(--muted); }
 
+.sub-nav { display: flex; gap: 0; margin: 0 0 16px; border: 1px solid #2b6cb0; border-radius: 10px; overflow: hidden; }
+.sub-nav-btn { flex: 1; padding: 10px 6px; border: none; background: white; color: #2b6cb0; font-size: 0.95rem; }
+.sub-nav-btn.active { background: #2b6cb0; color: white; font-weight: bold; }
+
 /* ---- 提出物の登録：カレンダー ---- */
 .cal-nav, .day-nav {
   display: flex;
