@@ -688,8 +688,7 @@ async function renderTeacherHome() {
 function teacherNav(active) {
   const tabs = [
     ['home', 'ホーム'],
-    ['today', '提出物の登録'],
-    ['items', '提出物マスタ'],
+    ['today', '提出物'],
     ['students', '名簿'],
     ['settings', '設定'],
   ];
@@ -697,6 +696,13 @@ function teacherNav(active) {
     ${tabs.map(([k, label]) => `<button class="nav-btn ${active === k ? 'active' : ''}" data-action="teacherTab" data-tab="${k}">${label}</button>`).join('')}
     <button class="nav-btn child" data-action="goChildSelect">児童画面へ</button>
   </nav>`;
+}
+
+// 「提出物」タブの中の切り替え（日ごとの登録／提出物の一覧・追加）
+function itemsSubNav(active) {
+  const tabs = [['today', '日ごとの登録'], ['items', '提出物の一覧・追加']];
+  return `<div class="sub-nav">${tabs.map(([k, label]) =>
+    `<button class="sub-nav-btn ${active === k ? 'active' : ''}" data-action="teacherTab" data-tab="${k}">${label}</button>`).join('')}</div>`;
 }
 
 async function renderTeacherStudents() {
@@ -867,8 +873,9 @@ async function renderTeacherItems() {
 
   app.innerHTML = `
     <div class="screen teacher-page">
-      ${teacherNav('items')}
-      <h1>提出物マスタ</h1>
+      ${teacherNav('today')}
+      ${itemsSubNav('items')}
+      <h1>提出物の一覧・追加</h1>
       <ul class="t-list">${rows}</ul>
       <section class="card">
         <h2>追加</h2>
@@ -1029,7 +1036,7 @@ async function renderTeacherToday() {
       <button type="button" class="mini-btn" data-action="appendDetailWord" data-for="todayDetail_${i.id}" data-word="ページ">ページ</button>
       <button type="button" class="mini-btn" data-action="appendDetailWord" data-for="todayDetail_${i.id}" data-word="番">番</button>
     </li>`;
-  }).join('') || '<li class="empty-row">提出物マスタがありません</li>';
+  }).join('') || '<li class="empty-row">提出物がありません。「提出物の一覧・追加」から追加してください。</li>';
 
   // 連絡帳は「次に提出物を集める日」に出すものを書くので、次の登校日の分から作る。
   const [nextSchool] = nextSchoolDays(addDays(targetDate, 1), 1, holidaySet);
@@ -1055,12 +1062,13 @@ async function renderTeacherToday() {
         <thead><tr><th></th>${['月', '火', '水', '木', '金'].map(n => `<th>${n}</th>`).join('')}</tr></thead>
         <tbody>${tmplRows}</tbody>
       </table></div>`
-    : '<p class="empty-row">提出物マスタがありません</p>';
+    : '<p class="empty-row">提出物がありません。「提出物の一覧・追加」から追加してください。</p>';
 
   app.innerHTML = `
     <div class="screen teacher-page">
       ${teacherNav('today')}
-      <h1>提出物の登録</h1>
+      ${itemsSubNav('today')}
+      <h1>日ごとの登録</h1>
 
       <section class="card">
         <div class="cal-nav">
