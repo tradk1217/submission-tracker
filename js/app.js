@@ -688,7 +688,7 @@ async function renderTeacherHome() {
 function teacherNav(active) {
   const tabs = [
     ['home', 'ホーム'],
-    ['today', '今日の提出物'],
+    ['today', '提出物の登録'],
     ['items', '提出物マスタ'],
     ['students', '名簿'],
     ['settings', '設定'],
@@ -932,16 +932,71 @@ async function renderTeacherItems() {
 }
 
 let teacherTodayDate = null;
+let teacherCalMonth = null;
+let teacherBulkOpen = false;
+
+function selectTeacherDate(dateStr) {
+  teacherTodayDate = dateStr;
+  teacherCalMonth = dateStr.slice(0, 7);
+  teacherBulkOpen = false;
+  renderTeacherToday();
+}
+
+function shiftMonthKey(monthKey, delta) {
+  const [y, m] = monthKey.split('-').map(Number);
+  const d = new Date(y, m - 1 + delta, 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+
+function mondayOf(dateStr) {
+  const wd = new Date(dateStr + 'T00:00:00').getDay();
+  return addDays(dateStr, wd === 0 ? -6 : 1 - wd);
+}
+
+function buildCalendarHtml(monthKey, selectedDate, countByDate, holidaySet) {
+  const [y, m] = monthKey.split('-').map(Number);
+  const startOffset = new Date(y, m - 1, 1).getDay();
+  const daysInMonth = new Date(y, m, 0).getDate();
+  const today = todayStr();
+  const heads = ['日', '月', '火', '水', '木', '金', '土']
+    .map((n, i) => `<div class="cal-head ${i === 0 ? 'sun' : i === 6 ? 'sat' : ''}">${n}</div>`).join('');
+  let cells = '';
+  for (let i = 0; i < startOffset; i++) cells += '<div class="cal-cell empty"></div>';
+  for (let d = 1; d <= daysInMonth; d++) {
+    const ds = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    const cnt = countByDate[ds] || 0;
+    const cls = ['cal-cell'];
+    if (!isSchoolDay(ds, holidaySet)) cls.push('off');
+    if (ds === selectedDate) cls.push('selected');
+    if (ds === today) cls.push('today');
+    cells += `<button type="button" class="${cls.join(' ')}" data-cal-date="${ds}"><span class="cal-num">${d}</span>${cnt ? `<span class="cal-count">${cnt}</span>` : ''}</button>`;
+  }
+  return heads + cells;
+}
+
+async function saveTemplateMatrix() {
+  const t = await getMeta('weeklyTemplates', {});
+  for (let wd = 1; wd <= 5; wd++) {
+    t[wd] = [...document.querySelectorAll(`.tmpl-cell[data-wd="${wd}"]:checked`)].map(el => Number(el.dataset.item));
+  }
+  await setMeta('weeklyTemplates', t);
+  return t;
+}
 
 async function renderTeacherToday() {
   const targetDate = teacherTodayDate || todayStr();
+  const monthKey = teacherCalMonth || targetDate.slice(0, 7);
   const isToday = targetDate === todayStr();
   const items = await getActiveItems();
+  const allAssignments = await DB.getAll('assignments');
+  const holidaySet = new Set((await getHolidays()).map(h => h.date));
   const dateList = await getAssignmentsForDate(targetDate);
   const assignedItemIds = new Set(dateList.map(a => a.itemId));
   const assignmentByItemId = Object.fromEntries(dateList.map(a => [a.itemId, a]));
 
-  const allAssignments = await DB.getAll('assignments');
+  const countByDate = {};
+  for (const a of allAssignments) countByDate[a.date] = (countByDate[a.date] || 0) + 1;
+
   const pastDates = [...new Set(allAssignments.map(a => a.date))].filter(d => d < targetDate).sort();
   const lastDate = pastDates[pastDates.length - 1];
   const lastDateItemIds = new Set(allAssignments.filter(a => a.date === lastDate).map(a => a.itemId));
@@ -976,60 +1031,126 @@ async function renderTeacherToday() {
     </li>`;
   }).join('') || '<li class="empty-row">提出物マスタがありません</li>';
 
-  const weekdayOptions = weekdayNames.map((n, i) => `<option value="${i}" ${i === weekday ? 'selected' : ''}>${n}曜日</option>`).join('');
-  const templateChecks = items.map(i => `
-    <li class="t-row">
-      <label style="display:flex;align-items:center;gap:8px;">
-        <input type="checkbox" class="tmpl-check" value="${i.id}" ${templateItemIds.has(i.id) ? 'checked' : ''}>
-        <span>${escapeHtml(i.name)}</span>
-      </label>
-    </li>`).join('') || '<li class="empty-row">提出物マスタがありません</li>';
+  const draftText = dateList.filter(a => a.item)
+    .map((a, idx) => (idx === 0 ? '宿　' : '　　') + a.item.name + (a.detail ? '　' + a.detail : ''))
+    .join('\n');
+
+  const [calY, calM] = monthKey.split('-').map(Number);
+  const offNote = isSchoolDay(targetDate, holidaySet)
+    ? ''
+    : '<p style="color:var(--muted);font-size:0.9rem;margin:6px 0;">この日は土日・お休みの日です。</p>';
+
+  const tmplRows = items.map(i => `
+    <tr>
+      <td class="tmpl-name">${escapeHtml(i.name)}</td>
+      ${[1, 2, 3, 4, 5].map(wd => `<td><input type="checkbox" class="tmpl-cell" data-item="${i.id}" data-wd="${wd}" ${(templates[wd] || []).includes(i.id) ? 'checked' : ''}></td>`).join('')}
+    </tr>`).join('');
+  const tmplTable = items.length
+    ? `<div class="tmpl-scroll"><table class="tmpl-table">
+        <thead><tr><th></th>${['月', '火', '水', '木', '金'].map(n => `<th>${n}</th>`).join('')}</tr></thead>
+        <tbody>${tmplRows}</tbody>
+      </table></div>`
+    : '<p class="empty-row">提出物マスタがありません</p>';
 
   app.innerHTML = `
     <div class="screen teacher-page">
       ${teacherNav('today')}
       <h1>提出物の登録</h1>
-      <div class="form-row" style="margin-bottom:16px;">
-        <input type="date" id="targetDateInput" value="${targetDate}">
-        <button class="mini-btn" id="gotoTodayBtn">今日にする</button>
-        <span style="color:#666;">${formatDateJp(targetDate)}（${weekdayNames[weekday]}）${isToday ? '＝今日' : ''}</span>
-      </div>
-      <ul class="t-list">${rows}</ul>
+
       <section class="card">
+        <div class="cal-nav">
+          <button class="mini-btn" id="calPrev" type="button">◀</button>
+          <strong>${calY}年${calM}月</strong>
+          <button class="mini-btn" id="calNext" type="button">▶</button>
+        </div>
+        <div class="cal-grid">${buildCalendarHtml(monthKey, targetDate, countByDate, holidaySet)}</div>
+        <p class="cal-legend">日付をタップするとその日の登録画面になります。数字は登録済みの提出物の数、グレーは土日・お休みの日です。</p>
+      </section>
+
+      <section class="card">
+        <div class="day-nav">
+          <button class="mini-btn" id="dayPrev" type="button">◀ 前の日</button>
+          <strong class="day-title">${formatDateJp(targetDate)}（${weekdayNames[weekday]}）${isToday ? '＝今日' : ''}</strong>
+          <button class="mini-btn" id="dayNext" type="button">次の日 ▶</button>
+        </div>
+        <div class="form-row" style="margin:10px 0;justify-content:center;">
+          <input type="date" id="targetDateInput" value="${targetDate}">
+          <button class="mini-btn" id="gotoTodayBtn" type="button">今日にする</button>
+        </div>
+        ${offNote}
+        <ul class="t-list">${rows}</ul>
         <p style="color:#666;font-size:0.9rem;">チェックは、この曜日のテンプレート（設定していれば）または前回登録した日と同じものが最初から入っています。詳細（ページ・番号など）は任意で入力できます。</p>
         <div style="margin-bottom:8px;">
-          <button class="mini-btn" id="checkAllBtn">すべて選択</button>
-          <button class="mini-btn" id="uncheckAllBtn">すべて解除</button>
+          <button class="mini-btn" id="checkAllBtn" type="button">すべて選択</button>
+          <button class="mini-btn" id="uncheckAllBtn" type="button">すべて解除</button>
         </div>
-        <button class="mini-btn primary" id="applyCheckedBtn">チェックしたものをこの日に追加</button>
+        <button class="mini-btn primary" id="applyCheckedBtn" type="button">チェックしたものをこの日に追加</button>
       </section>
+
       <section class="card">
-        <h2>曜日ごとのテンプレート</h2>
-        <p style="color:#666;font-size:0.9rem;">曜日を選んで、その曜日にいつも出す提出物を登録しておけます。</p>
-        <select id="tmplWeekdaySelect" style="padding:8px;border-radius:8px;border:1px solid var(--border);margin-bottom:10px;">${weekdayOptions}</select>
-        <ul class="t-list" id="tmplCheckList">${templateChecks}</ul>
-        <button class="mini-btn primary" id="saveTemplateBtn">このテンプレートを保存</button>
+        <h2>連絡帳の下書き（${formatDateJp(targetDate)}の宿題）</h2>
+        ${draftText
+          ? `<p style="color:#666;font-size:0.9rem;">この日に登録した提出物から作った文面です。必要なら直してから、コピーしてクラスルームに貼り付けてください。</p>
+        <textarea id="draftText" rows="${Math.max(3, draftText.split('\n').length + 1)}" style="width:100%;padding:10px;border:1px solid var(--border);border-radius:8px;font-size:1rem;font-family:inherit;user-select:text;-webkit-user-select:text;">${escapeHtml(draftText)}</textarea>
+        <button class="mini-btn primary" id="copyDraftBtn" type="button" style="margin-top:8px;">コピー</button>`
+          : '<p class="empty-row">この日はまだ提出物が登録されていません。</p>'}
       </section>
-      <section class="card">
-        <h2>期間をまとめて登録</h2>
-        <p style="color:#666;font-size:0.9rem;">上の「曜日ごとのテンプレート」を、選んだ期間の毎日に一度に当てはめます。土日・お休みの日（設定で登録した日）は自動で飛ばし、すでに登録済みのものは重複しません。詳細（ページなど）は、あとから各日で「編集」できます。</p>
-        <div class="form-row" style="margin-bottom:10px;">
-          <input type="date" id="bulkStart" value="${todayStr()}">
+
+      <details class="card" id="bulkDetails" ${teacherBulkOpen ? 'open' : ''}>
+        <summary style="font-weight:bold;font-size:1.1rem;cursor:pointer;">まとめて登録（曜日テンプレート・期間）</summary>
+        <p style="color:#666;font-size:0.9rem;">① 曜日ごとに、いつも出す提出物にチェックを入れます。② 期間を選んで「保存して期間に適用」を押すと、その期間の毎日に一度に登録されます。土日・お休みの日は自動で飛ばし、登録済みのものは重複しません。詳細（ページなど）は、あとから各日で「編集」できます。</p>
+        <h3 style="font-size:1rem;margin:12px 0 6px;">① 曜日ごとのテンプレート</h3>
+        ${tmplTable}
+        <h3 style="font-size:1rem;margin:14px 0 6px;">② 期間</h3>
+        <div class="form-row" style="margin-bottom:8px;">
+          <input type="date" id="bulkStart" value="${targetDate}">
           <span>〜</span>
-          <input type="date" id="bulkEnd" value="${addDays(todayStr(), 6)}">
+          <input type="date" id="bulkEnd" value="${addDays(targetDate, 6)}">
         </div>
-        <button class="mini-btn primary" id="bulkApplyBtn">この期間にテンプレートを適用</button>
-      </section>
+        <div style="margin-bottom:12px;">
+          <button class="mini-btn" id="rangeThisWeekBtn" type="button">今週</button>
+          <button class="mini-btn" id="rangeNextWeekBtn" type="button">来週</button>
+          <button class="mini-btn" id="rangeMonthBtn" type="button">${calM}月ぜんぶ</button>
+        </div>
+        <button class="mini-btn" id="saveTmplBtn" type="button">テンプレートだけ保存</button>
+        <button class="mini-btn primary" id="bulkApplyBtn" type="button">保存して期間に適用</button>
+      </details>
     </div>
   `;
+
+  app.querySelectorAll('[data-cal-date]').forEach(btn => {
+    btn.addEventListener('click', () => selectTeacherDate(btn.dataset.calDate));
+  });
+  document.getElementById('calPrev').addEventListener('click', () => {
+    teacherCalMonth = shiftMonthKey(monthKey, -1);
+    renderTeacherToday();
+  });
+  document.getElementById('calNext').addEventListener('click', () => {
+    teacherCalMonth = shiftMonthKey(monthKey, 1);
+    renderTeacherToday();
+  });
+  document.getElementById('dayPrev').addEventListener('click', () => selectTeacherDate(addDays(targetDate, -1)));
+  document.getElementById('dayNext').addEventListener('click', () => selectTeacherDate(addDays(targetDate, 1)));
   document.getElementById('targetDateInput').addEventListener('change', (e) => {
-    teacherTodayDate = e.target.value || todayStr();
-    renderTeacherToday();
+    selectTeacherDate(e.target.value || todayStr());
   });
-  document.getElementById('gotoTodayBtn').addEventListener('click', () => {
-    teacherTodayDate = todayStr();
-    renderTeacherToday();
-  });
+  document.getElementById('gotoTodayBtn').addEventListener('click', () => selectTeacherDate(todayStr()));
+  const copyDraftBtn = document.getElementById('copyDraftBtn');
+  if (copyDraftBtn) {
+    copyDraftBtn.addEventListener('click', async () => {
+      const ta = document.getElementById('draftText');
+      try {
+        await navigator.clipboard.writeText(ta.value);
+      } catch (err) {
+        ta.select();
+        if (!document.execCommand('copy')) {
+          alert('コピーできませんでした。文面を長押ししてコピーしてください。');
+          return;
+        }
+      }
+      showToast('コピーしました');
+    });
+  }
   document.getElementById('checkAllBtn').addEventListener('click', () => {
     document.querySelectorAll('.today-check').forEach(el => { el.checked = true; });
   });
@@ -1047,19 +1168,26 @@ async function renderTeacherToday() {
     showToast(`${checkedEls.length}件 追加しました`);
     renderTeacherToday();
   });
-  document.getElementById('tmplWeekdaySelect').addEventListener('change', async (e) => {
-    const wd = Number(e.target.value);
-    const t = await getMeta('weeklyTemplates', {});
-    const ids = new Set(t[wd] || []);
-    document.querySelectorAll('.tmpl-check').forEach(el => { el.checked = ids.has(Number(el.value)); });
+
+  const setRange = (start, end) => {
+    document.getElementById('bulkStart').value = start;
+    document.getElementById('bulkEnd').value = end;
+  };
+  document.getElementById('rangeThisWeekBtn').addEventListener('click', () => {
+    const mon = mondayOf(todayStr());
+    setRange(mon, addDays(mon, 4));
   });
-  document.getElementById('saveTemplateBtn').addEventListener('click', async () => {
-    const wd = Number(document.getElementById('tmplWeekdaySelect').value);
-    const ids = [...document.querySelectorAll('.tmpl-check:checked')].map(el => Number(el.value));
-    const t = await getMeta('weeklyTemplates', {});
-    t[wd] = ids;
-    await setMeta('weeklyTemplates', t);
-    showToast(`${weekdayNames[wd]}曜日のテンプレートを保存しました`);
+  document.getElementById('rangeNextWeekBtn').addEventListener('click', () => {
+    const mon = addDays(mondayOf(todayStr()), 7);
+    setRange(mon, addDays(mon, 4));
+  });
+  document.getElementById('rangeMonthBtn').addEventListener('click', () => {
+    const last = String(new Date(calY, calM, 0).getDate()).padStart(2, '0');
+    setRange(`${monthKey}-01`, `${monthKey}-${last}`);
+  });
+  document.getElementById('saveTmplBtn').addEventListener('click', async () => {
+    await saveTemplateMatrix();
+    showToast('テンプレートを保存しました');
   });
   document.getElementById('bulkApplyBtn').addEventListener('click', async () => {
     const start = document.getElementById('bulkStart').value;
@@ -1068,9 +1196,8 @@ async function renderTeacherToday() {
       alert('開始日と終了日を正しく選んでください。');
       return;
     }
-    const holidaySet = new Set((await getHolidays()).map(h => h.date));
-    const tmpl = await getMeta('weeklyTemplates', {});
-    const activeIds = new Set((await getActiveItems()).map(i => i.id));
+    const tmpl = await saveTemplateMatrix();
+    const activeIds = new Set(items.map(i => i.id));
     const existing = new Set((await DB.getAll('assignments')).map(a => `${a.date}_${a.itemId}`));
     const plan = [];
     let d = start;
@@ -1083,12 +1210,18 @@ async function renderTeacherToday() {
       }
       d = addDays(d, 1);
     }
+    teacherBulkOpen = true;
     if (!plan.length) {
-      alert('追加できるものがありませんでした。曜日ごとのテンプレートが未設定か、期間内はすでにすべて登録済みです。');
+      showToast('テンプレートを保存しました');
+      alert('追加できるものがありませんでした。曜日ごとのテンプレートにチェックがないか、期間内はすでにすべて登録済みです。');
+      renderTeacherToday();
       return;
     }
     const dayCount = new Set(plan.map(p => p.date)).size;
-    if (!confirm(`${formatDateJp(start)}〜${formatDateJp(end)}の${dayCount}日分、合計${plan.length}件を追加します。よろしいですか？`)) return;
+    if (!confirm(`${formatDateJp(start)}〜${formatDateJp(end)}の${dayCount}日分、合計${plan.length}件を追加します。よろしいですか？`)) {
+      renderTeacherToday();
+      return;
+    }
     for (const p of plan) await addAssignmentLocal({ date: p.date, itemId: p.itemId, deadline: null, detail: '' });
     showToast(`${dayCount}日分・${plan.length}件 追加しました`);
     renderTeacherToday();
