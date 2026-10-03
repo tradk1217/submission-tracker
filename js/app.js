@@ -1010,6 +1010,16 @@ async function renderTeacherToday() {
         <ul class="t-list" id="tmplCheckList">${templateChecks}</ul>
         <button class="mini-btn primary" id="saveTemplateBtn">このテンプレートを保存</button>
       </section>
+      <section class="card">
+        <h2>期間をまとめて登録</h2>
+        <p style="color:#666;font-size:0.9rem;">上の「曜日ごとのテンプレート」を、選んだ期間の毎日に一度に当てはめます。土日・お休みの日（設定で登録した日）は自動で飛ばし、すでに登録済みのものは重複しません。詳細（ページなど）は、あとから各日で「編集」できます。</p>
+        <div class="form-row" style="margin-bottom:10px;">
+          <input type="date" id="bulkStart" value="${todayStr()}">
+          <span>〜</span>
+          <input type="date" id="bulkEnd" value="${addDays(todayStr(), 6)}">
+        </div>
+        <button class="mini-btn primary" id="bulkApplyBtn">この期間にテンプレートを適用</button>
+      </section>
     </div>
   `;
   document.getElementById('targetDateInput').addEventListener('change', (e) => {
@@ -1050,6 +1060,38 @@ async function renderTeacherToday() {
     t[wd] = ids;
     await setMeta('weeklyTemplates', t);
     showToast(`${weekdayNames[wd]}曜日のテンプレートを保存しました`);
+  });
+  document.getElementById('bulkApplyBtn').addEventListener('click', async () => {
+    const start = document.getElementById('bulkStart').value;
+    const end = document.getElementById('bulkEnd').value;
+    if (!start || !end || start > end) {
+      alert('開始日と終了日を正しく選んでください。');
+      return;
+    }
+    const holidaySet = new Set((await getHolidays()).map(h => h.date));
+    const tmpl = await getMeta('weeklyTemplates', {});
+    const activeIds = new Set((await getActiveItems()).map(i => i.id));
+    const existing = new Set((await DB.getAll('assignments')).map(a => `${a.date}_${a.itemId}`));
+    const plan = [];
+    let d = start;
+    for (let guard = 0; d <= end && guard < 366; guard++) {
+      if (isSchoolDay(d, holidaySet)) {
+        const wd = new Date(d + 'T00:00:00').getDay();
+        for (const id of (tmpl[wd] || [])) {
+          if (activeIds.has(id) && !existing.has(`${d}_${id}`)) plan.push({ date: d, itemId: id });
+        }
+      }
+      d = addDays(d, 1);
+    }
+    if (!plan.length) {
+      alert('追加できるものがありませんでした。曜日ごとのテンプレートが未設定か、期間内はすでにすべて登録済みです。');
+      return;
+    }
+    const dayCount = new Set(plan.map(p => p.date)).size;
+    if (!confirm(`${formatDateJp(start)}〜${formatDateJp(end)}の${dayCount}日分、合計${plan.length}件を追加します。よろしいですか？`)) return;
+    for (const p of plan) await addAssignmentLocal({ date: p.date, itemId: p.itemId, deadline: null, detail: '' });
+    showToast(`${dayCount}日分・${plan.length}件 追加しました`);
+    renderTeacherToday();
   });
 }
 
