@@ -1031,7 +1031,12 @@ async function renderTeacherToday() {
     </li>`;
   }).join('') || '<li class="empty-row">提出物マスタがありません</li>';
 
-  const draftText = dateList.filter(a => a.item)
+  // 連絡帳は「次に提出物を集める日」に出すものを書くので、次の登校日の分から作る。
+  const [nextSchool] = nextSchoolDays(addDays(targetDate, 1), 1, holidaySet);
+  const draftDate = nextSchool ? nextSchool.date : addDays(targetDate, 1);
+  const draftWd = weekdayNames[new Date(draftDate + 'T00:00:00').getDay()];
+  const draftList = await getAssignmentsForDate(draftDate);
+  const draftText = draftList.filter(a => a.item)
     .map((a, idx) => (idx === 0 ? '宿　' : '　　') + a.item.name + (a.detail ? '　' + a.detail : ''))
     .join('\n');
 
@@ -1090,10 +1095,10 @@ async function renderTeacherToday() {
       <section class="card">
         <h2>連絡帳の下書き（${formatDateJp(targetDate)}の宿題）</h2>
         ${draftText
-          ? `<p style="color:#666;font-size:0.9rem;">この日に登録した提出物から作った文面です。必要なら直してから、コピーしてクラスルームに貼り付けてください。</p>
+          ? `<p style="color:#666;font-size:0.9rem;">次の登校日 ${formatDateJp(draftDate)}（${draftWd}）に集める提出物から作った文面です。必要なら直してから、コピーしてクラスルームに貼り付けてください。</p>
         <textarea id="draftText" rows="${Math.max(3, draftText.split('\n').length + 1)}" style="width:100%;padding:10px;border:1px solid var(--border);border-radius:8px;font-size:1rem;font-family:inherit;user-select:text;-webkit-user-select:text;">${escapeHtml(draftText)}</textarea>
         <button class="mini-btn primary" id="copyDraftBtn" type="button" style="margin-top:8px;">コピー</button>`
-          : '<p class="empty-row">この日はまだ提出物が登録されていません。</p>'}
+          : `<p class="empty-row">次の登校日 ${formatDateJp(draftDate)}（${draftWd}）に集める提出物が、まだ登録されていません。カレンダーでその日を選んで登録してください。</p>`}
       </section>
 
       <details class="card" id="bulkDetails" ${teacherBulkOpen ? 'open' : ''}>
