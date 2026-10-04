@@ -1,6 +1,6 @@
 // クラウド同期(Firestore)。児童の氏名・ふりがなは絶対に送信しない。
 // 送るのは「コード」(js/util.js の generateCode で作るランダムな識別子)と、
-// 提出物マスタ・今日の提出対象・提出状況・履歴のみ。
+// 提出物マスタ・今日の提出対象・提出状況(先生のコメントを含む)・履歴のみ。
 //
 // 端末ごとにIndexedDBのオートインクリメントIDはバラバラになるため、
 // 端末をまたいで同じ人・同じ課題だと分かるように、児童は"code"、
@@ -229,9 +229,7 @@ export async function startSync() {
         updatedAt: data.updatedAt, updatedBy: data.updatedBy,
         ...(localAssignmentId ? {} : { _pendingAssignmentSyncId: data.assignmentSyncId }),
       };
-      // コメントはこの端末だけに保存する（自由記述に氏名が入っても外に出ないように、同期しない）。
-      const prev = await DB.get('statuses', key);
-      if (prev && prev.comment) row.comment = prev.comment;
+      if (data.comment) row.comment = data.comment;
       await DB.put('statuses', row);
     }
     notify();
@@ -320,6 +318,7 @@ export function pushStatus(statusRow) {
     await setDoc(doc(dbFs, 'classes', classroomId, 'statuses', docId), {
       studentCode: code, assignmentSyncId, status: statusRow.status,
       plannedDate: statusRow.plannedDate, updatedAt: statusRow.updatedAt, updatedBy: statusRow.updatedBy,
+      ...(statusRow.comment ? { comment: statusRow.comment } : {}),
     });
   });
 }

@@ -1598,7 +1598,7 @@ async function renderTeacherSettings() {
       <h1>設定</h1>
       <section class="card">
         <h2>クラウド同期（複数端末をリアルタイムで揃える）</h2>
-        <p style="color:#666;font-size:0.9rem;">児童の氏名・ふりがなは送信されません。送られるのはランダムなコードと、提出物・提出状況のみです。同期コードは合言葉のようなものなので、他人に教えないでください。</p>
+        <p style="color:#666;font-size:0.9rem;">児童の氏名・ふりがなは送信されません。送られるのはランダムなコードと、提出物・提出状況・先生のコメントのみです（コメントに児童の氏名は書かないでください）。同期コードは合言葉のようなものなので、他人に教えないでください。</p>
         ${classroomId ? `
           <p>同期コード：<strong style="font-family:monospace;font-size:1.1rem;">${escapeHtml(classroomId)}</strong>　<button class="mini-btn" id="copyClassroomIdBtn" type="button">コピー</button>　${syncState.connected ? '<span style="color:var(--ok);">● 接続中</span>' : '<span style="color:var(--muted);">○ 未接続</span>'}</p>
           <p style="color:#666;font-size:0.85rem;">他の端末では、名簿画面で先に「名簿（コード付き）」を取り込んでから、この同期コードを入力するか、QRコードを読み取って参加してください。</p>
@@ -2040,13 +2040,18 @@ const ROSTER_BRUSHES = [
 // 提出状況の一括登録モーダルの状態。タップするたびに即保存し、画面だけを部分的に更新する。
 const rosterState = { assignmentId: null, students: [], statuses: {}, comments: {}, brush: STATUS.SUBMITTED };
 
-const COMMENT_TEMPLATES = ['ページがない', '名前がない', '日づけがない', '字をていねいに', 'やり直し'];
+const COMMENT_TEMPLATES = ['欠席', 'ページがない', '名前がない', '日づけがない', '字をていねいに', 'やり直し'];
 
 async function saveStudentComment(studentId, assignmentId, text) {
   const st = await getStatus(studentId, assignmentId);
   if (text) st.comment = text; else delete st.comment;
-  if (!text && st.status === STATUS.NOT_SUBMITTED && !st.updatedAt) await DB.delete('statuses', st.key);
-  else await DB.put('statuses', st);
+  if (!text && st.status === STATUS.NOT_SUBMITTED && !st.updatedAt) {
+    await DB.delete('statuses', st.key);
+    Sync.deleteStatusRemote(studentId, assignmentId);
+  } else {
+    await DB.put('statuses', st);
+    Sync.pushStatus(st);
+  }
 }
 
 function paintRoster() {
@@ -2098,7 +2103,7 @@ async function openItemRoster(assignmentId) {
         ${COMMENT_TEMPLATES.map(w => `<button type="button" class="mini-btn" data-action="appendCommentWord" data-word="${w}">${w}</button>`).join('')}
         <button type="button" class="mini-btn" data-action="clearCommentText">入力を消す</button>
       </div>
-      <p style="color:#666;font-size:0.8rem;margin:6px 0 0;text-align:left;">この状態で児童をタップすると、上のコメントが付きます（何人でも続けて付けられます）。同じコメントの人をもう一度タップすると、コメントが消えます。入力を空にしてタップしても消えます。児童画面では、「直すもの」の児童にだけ表示されます。コメントはこの端末だけに保存され、クラウド同期はされません。</p>
+      <p style="color:#666;font-size:0.8rem;margin:6px 0 0;text-align:left;">この状態で児童をタップすると、上のコメントが付きます（何人でも続けて付けられます）。同じコメントの人をもう一度タップすると、コメントが消えます。入力を空にしてタップしても消えます。児童画面では、「直すもの」の児童にだけ表示されます。クラウド同期をしているときは、他の端末にも共有されます（コメントに児童の氏名は書かないでください）。</p>
     </div>
     <button type="button" class="mini-btn" data-action="rosterAllSubmitted" style="margin:8px 0;">まだの人を全員「出せた」にする</button>
     <p id="rosterCounts" class="roster-counts"></p>
