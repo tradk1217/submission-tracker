@@ -11,6 +11,54 @@ export function addDays(dateStr, days) {
   return todayStr(d);
 }
 
+// 日本の国民の祝日（振替休日・国民の休日を含む）を、その年の分だけ計算して返す。2000〜2099年向け。
+// 戻り値：Map（'YYYY-MM-DD' → 祝日名）
+export function japaneseHolidays(y) {
+  const pad = (n) => String(n).padStart(2, '0');
+  const map = new Map();
+  const add = (m, d, name) => map.set(`${y}-${pad(m)}-${pad(d)}`, name);
+  const nthMonday = (m, n) => {
+    const first = new Date(y, m - 1, 1).getDay();
+    return 1 + ((1 - first + 7) % 7) + (n - 1) * 7;
+  };
+  const shun = Math.floor(20.8431 + 0.242194 * (y - 1980) - Math.floor((y - 1980) / 4));
+  const shu = Math.floor(23.2488 + 0.242194 * (y - 1980) - Math.floor((y - 1980) / 4));
+
+  add(1, 1, '元日');
+  add(1, nthMonday(1, 2), '成人の日');
+  add(2, 11, '建国記念の日');
+  if (y >= 2020) add(2, 23, '天皇誕生日');
+  if (y <= 2018) add(12, 23, '天皇誕生日');
+  add(3, shun, '春分の日');
+  add(4, 29, '昭和の日');
+  add(5, 3, '憲法記念日');
+  add(5, 4, 'みどりの日');
+  add(5, 5, 'こどもの日');
+  if (y === 2020) add(7, 23, '海の日'); else if (y === 2021) add(7, 22, '海の日'); else add(7, nthMonday(7, 3), '海の日');
+  if (y === 2020) add(8, 10, '山の日'); else if (y === 2021) add(8, 8, '山の日'); else add(8, 11, '山の日');
+  add(9, nthMonday(9, 3), '敬老の日');
+  add(9, shu, '秋分の日');
+  if (y === 2020) add(7, 24, 'スポーツの日'); else if (y === 2021) add(7, 23, 'スポーツの日'); else add(10, nthMonday(10, 2), 'スポーツの日');
+  add(11, 3, '文化の日');
+  add(11, 23, '勤労感謝の日');
+  if (y === 2019) { add(5, 1, '天皇の即位の日'); add(10, 22, '即位礼正殿の儀の行われる日'); }
+
+  const base = [...map.keys()].sort();
+  // 国民の休日：前後が祝日にはさまれた平日
+  for (let d = `${y}-01-02`; d < `${y}-12-31`; d = addDays(d, 1)) {
+    if (map.has(d) || new Date(d + 'T00:00:00').getDay() === 0) continue;
+    if (base.includes(addDays(d, -1)) && base.includes(addDays(d, 1))) map.set(d, '国民の休日');
+  }
+  // 振替休日：日曜と重なった祝日は、次の祝日でない日
+  for (const k of base) {
+    if (new Date(k + 'T00:00:00').getDay() !== 0) continue;
+    let d = addDays(k, 1);
+    while (map.has(d)) d = addDays(d, 1);
+    map.set(d, '振替休日');
+  }
+  return map;
+}
+
 export function formatDateJp(dateStr) {
   const [y, m, d] = dateStr.split('-');
   return `${Number(m)}/${Number(d)}`;

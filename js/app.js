@@ -1,5 +1,5 @@
 import { DB, getMeta, setMeta, ALL_STORES } from './db.js';
-import { todayStr, addDays, formatDateJp, formatDateTimeJp, deadlineState, rubyHtml, escapeHtml, parseCsv, downloadCsv, toCsv, generateCode, uid, attachFuriganaAutofill } from './util.js';
+import { todayStr, addDays, japaneseHolidays, formatDateJp, formatDateTimeJp, deadlineState, rubyHtml, escapeHtml, parseCsv, downloadCsv, toCsv, generateCode, uid, attachFuriganaAutofill } from './util.js';
 import * as Sync from './sync.js';
 
 const STATUS = {
@@ -471,6 +471,12 @@ async function getHolidays() {
 // 1日だけの登録と期間（date〜end）の登録を、日付ごとの集合にほどいて返す。
 async function getHolidaySet() {
   const set = new Set();
+  if (await getMeta('autoHolidays', true) !== false) {
+    const thisYear = new Date().getFullYear();
+    for (let y = thisYear - 1; y <= thisYear + 3; y++) {
+      for (const k of japaneseHolidays(y).keys()) set.add(k);
+    }
+  }
   for (const h of await getHolidays()) {
     let d = h.date;
     const end = h.end && h.end > h.date ? h.end : h.date;
@@ -1511,9 +1517,26 @@ async function renderHolidayCard() {
   const card = document.getElementById('holidayCard');
   if (!card) return;
   const holidays = (await getHolidays()).slice().sort((a, b) => a.date.localeCompare(b.date));
+  const autoHolidays = await getMeta('autoHolidays', true) !== false;
+  const today = todayStr();
+  const limit = addDays(today, 366);
+  const upcomingHolidays = [];
+  for (let y = new Date().getFullYear(); y <= new Date().getFullYear() + 1; y++) {
+    for (const [d, name] of japaneseHolidays(y)) if (d >= today && d <= limit) upcomingHolidays.push([d, name]);
+  }
+  upcomingHolidays.sort((a, b) => a[0].localeCompare(b[0]));
   card.innerHTML = `
     <h2>お休みの日（祝日・学校行事など）</h2>
-    <p style="color:#666;font-size:0.9rem;">土日は自動的に選択肢から外れます。祝日や学校のお休みなど、それ以外の日をここに追加すると、児童の「いつ出す」の選択肢から外れ、カレンダーでもグレーになります。夏休みなどは、期間でまとめて登録できます。</p>
+    <p style="color:#666;font-size:0.9rem;">土日と、国民の祝日（振替休日を含む）は自動的にお休みになり、児童の「いつ出す」の選択肢から外れ、カレンダーでもグレーになります。夏休み・学校行事の振替休業日など、それ以外のお休みの日は下から登録してください。期間でまとめて登録することもできます。</p>
+    <label style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+      <input type="checkbox" id="autoHolidayCheck" ${autoHolidays ? 'checked' : ''}>
+      <span>国民の祝日を自動でお休みにする</span>
+    </label>
+    <details style="margin-bottom:12px;">
+      <summary style="cursor:pointer;color:#2b6cb0;">自動でお休みになる祝日を見る（これから1年分）</summary>
+      <ul class="t-list">${upcomingHolidays.map(([d, name]) => `<li class="t-row"><span class="t-name">${formatDateJp(d)}（${['日', '月', '火', '水', '木', '金', '土'][new Date(d + 'T00:00:00').getDay()]}）　${escapeHtml(name)}</span></li>`).join('')}</ul>
+    </details>
+    <h3 style="font-size:1rem;margin:12px 0 6px;">それ以外のお休みの日を追加</h3>
     <div class="form-row" style="margin-bottom:6px;align-items:center;">
       <input type="date" id="newHolidayDate" style="padding:8px;border:1px solid var(--border);border-radius:8px;">
       <span>〜</span>
@@ -1533,6 +1556,10 @@ async function renderHolidayCard() {
       `).join('') || '<li class="empty-row">登録されていません</li>'}
     </ul>
   `;
+  document.getElementById('autoHolidayCheck').addEventListener('change', async (e) => {
+    await setMeta('autoHolidays', e.target.checked);
+    showToast(e.target.checked ? '祝日を自動でお休みにします' : '祝日の自動設定をやめました');
+  });
   document.getElementById('addHolidayBtn').addEventListener('click', async () => {
     const dateVal = document.getElementById('newHolidayDate').value;
     const endVal = document.getElementById('newHolidayEnd').value;
