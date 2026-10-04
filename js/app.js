@@ -362,7 +362,7 @@ async function renderChildPage() {
     const waiting = st.status === STATUS.RESUBMIT_WAIT;
     return `<li class="item-row ${waiting ? 'st-wait' : 'st-redo'}" data-action="${waiting ? 'redoInfo' : 'openRedoSheet'}" data-assignment="${a.id}">
       <span class="item-icon">${waiting ? '→' : '★'}</span>
-      <span class="item-name">${itemNameHtml(a)}</span>
+      <span class="item-name">${itemNameHtml(a)}${st.comment ? `<span class="item-comment">${rubyHtml('先生', 'せんせい')}から：${escapeHtml(st.comment)}</span>` : ''}</span>
       <span class="item-status">${waiting ? childLabel(STATUS.RESUBMIT_WAIT) : rubyHtml('直', 'なお') + 'してね'}</span>
     </li>`;
   }).join('') : '<li class="empty-row">ありません</li>';
@@ -1936,24 +1936,13 @@ const ROSTER_BRUSHES = [
 // 提出状況の一括登録モーダルの状態。タップするたびに即保存し、画面だけを部分的に更新する。
 const rosterState = { assignmentId: null, students: [], statuses: {}, comments: {}, brush: STATUS.SUBMITTED };
 
-async function openRosterComment(studentId) {
-  const student = rosterState.students.find(s => s.id === studentId);
-  const assignment = await DB.get('assignments', rosterState.assignmentId);
-  const item = await DB.get('items', assignment.itemId);
-  renderModal(`
-    <h3>${student.number}番 ${escapeHtml(student.name)}さん</h3>
-    <p style="margin:0 0 8px;color:#666;">${escapeHtml(item.name)}${assignment.detail ? '　' + escapeHtml(assignment.detail) : ''} へのコメント</p>
-    <textarea id="rosterCommentInput" rows="4" style="width:100%;padding:10px;border:1px solid var(--border);border-radius:8px;font-size:1rem;font-family:inherit;user-select:text;-webkit-user-select:text;">${escapeHtml(rosterState.comments[studentId] || '')}</textarea>
-    <div style="margin-top:6px;">
-      ${['よくできました', 'ページぬけ', '名前がない', '字をていねいに', 'やり直し'].map(w =>
-        `<button type="button" class="mini-btn" data-action="appendCommentWord" data-word="${w}">${w}</button>`).join('')}
-    </div>
-    <p style="color:#666;font-size:0.8rem;margin:8px 0 0;">コメントはこの端末だけに保存され、クラウド同期や児童画面には出ません。空にして保存すると消えます。</p>
-    <div class="sheet-buttons">
-      <button class="big-btn yes" data-action="saveRosterComment" data-student="${studentId}">保存</button>
-      <button class="big-btn cancel" data-action="rosterBackToList">もどる</button>
-    </div>
-  `);
+const COMMENT_TEMPLATES = ['ページがない', '名前がない', '日づけがない', '字をていねいに', 'やり直し'];
+
+async function saveStudentComment(studentId, assignmentId, text) {
+  const st = await getStatus(studentId, assignmentId);
+  if (text) st.comment = text; else delete st.comment;
+  if (!text && st.status === STATUS.NOT_SUBMITTED && !st.updatedAt) await DB.delete('statuses', st.key);
+  else await DB.put('statuses', st);
 }
 
 function paintRoster() {
@@ -1961,11 +1950,12 @@ function paintRoster() {
   if (!grid) return;
   grid.innerHTML = rosterState.students.map(s => {
     const meta = STATUS_META[rosterState.statuses[s.id]];
-    const hasComment = !!rosterState.comments[s.id];
+    const comment = rosterState.comments[s.id];
     return `<button type="button" class="roster-tile ${meta.cls}" data-action="rosterTile" data-student="${s.id}">
-      <span class="rt-num">${s.number}${hasComment ? '<span class="rt-note">✎</span>' : ''}</span>
+      <span class="rt-num">${s.number}${comment ? '<span class="rt-note">✎</span>' : ''}</span>
       <span class="rt-name">${escapeHtml(s.name)}</span>
       <span class="rt-status">${meta.icon} ${meta.label}</span>
+      ${comment ? `<span class="rt-comment">${escapeHtml(comment)}</span>` : ''}
     </button>`;
   }).join('') || '<p>児童が登録されていません</p>';
   const c = {};
@@ -1977,6 +1967,8 @@ function paintRoster() {
   const counts = document.getElementById('rosterCounts');
   if (counts) counts.textContent = `出せた ${c[STATUS.SUBMITTED] || 0}／${total}人　まだ ${notYet}人　直し ${redo}人　免除 ${exempt}人`;
   document.querySelectorAll('.brush-btn').forEach(b => b.classList.toggle('active', b.dataset.brush === rosterState.brush));
+  const panel = document.getElementById('rosterCommentPanel');
+  if (panel) panel.style.display = rosterState.brush === 'comment' ? 'block' : 'none';
 }
 
 async function openItemRoster(assignmentId) {
@@ -1996,6 +1988,14 @@ async function openItemRoster(assignmentId) {
     <h3>${escapeHtml(item.name)}${assignment.detail ? '　' + escapeHtml(assignment.detail) : ''} ${deadlineBadge(assignment.deadline)}</h3>
     <p class="cal-legend" style="margin:0 0 8px;text-align:left;">① 下から、つけたい状態を選びます。② 児童をタップすると、その状態になります。続けて何人でもタップできます。</p>
     <div class="brush-bar">${ROSTER_BRUSHES.map(b => `<button type="button" class="brush-btn" data-action="rosterBrush" data-brush="${b.status}">${b.label}</button>`).join('')}</div>
+    <div id="rosterCommentPanel" class="comment-panel" style="display:none;">
+      <textarea id="rosterCommentText" rows="2" placeholder="つけたいコメントを入力（または下のボタン）" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:8px;font-size:1rem;font-family:inherit;user-select:text;-webkit-user-select:text;"></textarea>
+      <div style="margin-top:6px;">
+        ${COMMENT_TEMPLATES.map(w => `<button type="button" class="mini-btn" data-action="appendCommentWord" data-word="${w}">${w}</button>`).join('')}
+        <button type="button" class="mini-btn" data-action="clearCommentText">入力を消す</button>
+      </div>
+      <p style="color:#666;font-size:0.8rem;margin:6px 0 0;text-align:left;">この状態で児童をタップすると、上のコメントが付きます（何人でも続けて付けられます）。同じコメントの人をもう一度タップすると、コメントが消えます。入力を空にしてタップしても消えます。児童画面では、「直すもの」の児童にだけ表示されます。コメントはこの端末だけに保存され、クラウド同期はされません。</p>
+    </div>
     <button type="button" class="mini-btn" data-action="rosterAllSubmitted" style="margin:8px 0;">まだの人を全員「出せた」にする</button>
     <p id="rosterCounts" class="roster-counts"></p>
     <div id="rosterGrid" class="roster-grid"></div>
@@ -2407,7 +2407,11 @@ async function handleAction(action, ds) {
       const studentId = Number(ds.student);
       const status = rosterState.brush;
       if (status === 'comment') {
-        await openRosterComment(studentId);
+        const text = document.getElementById('rosterCommentText').value.trim();
+        const next = text && rosterState.comments[studentId] === text ? '' : text;
+        if (next) rosterState.comments[studentId] = next; else delete rosterState.comments[studentId];
+        paintRoster();
+        await saveStudentComment(studentId, rosterState.assignmentId, next);
         return;
       }
       if (rosterState.statuses[studentId] === status) return;
@@ -2417,24 +2421,14 @@ async function handleAction(action, ds) {
       return;
     }
     case 'appendCommentWord': {
-      const input = document.getElementById('rosterCommentInput');
+      const input = document.getElementById('rosterCommentText');
       if (!input) return;
       input.value = input.value.trim() ? `${input.value.trim()}、${ds.word}` : ds.word;
-      input.focus();
       return;
     }
-    case 'rosterBackToList':
-      await openItemRoster(rosterState.assignmentId);
-      return;
-    case 'saveRosterComment': {
-      const studentId = Number(ds.student);
-      const text = document.getElementById('rosterCommentInput').value.trim();
-      const st = await getStatus(studentId, rosterState.assignmentId);
-      if (text) st.comment = text; else delete st.comment;
-      if (!text && st.status === STATUS.NOT_SUBMITTED && !st.updatedAt) await DB.delete('statuses', st.key);
-      else await DB.put('statuses', st);
-      showToast(text ? 'コメントを保存しました' : 'コメントを消しました');
-      await openItemRoster(rosterState.assignmentId);
+    case 'clearCommentText': {
+      const input = document.getElementById('rosterCommentText');
+      if (input) input.value = '';
       return;
     }
     case 'rosterAllSubmitted': {
