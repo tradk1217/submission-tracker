@@ -48,7 +48,8 @@ function deadlineBadge(deadline) {
   const dl = deadlineState(deadline);
   if (!dl) return '';
   const cls = { over: 'dl-over', today: 'dl-today', soon: 'dl-soon', ok: 'dl-ok' }[dl.level];
-  return `<span class="dl-badge ${cls}">${dl.label} ${formatDateTimeJp(deadline)}</span>`;
+  const note = { over: '・過ぎています', today: '・今日まで', soon: '・もうすぐ', ok: '' }[dl.level];
+  return `<span class="dl-badge ${cls}">提出期限 ${formatDateTimeJp(deadline)}${note}</span>`;
 }
 
 const app = document.getElementById('app');
@@ -136,9 +137,32 @@ async function getActiveStudents() {
   return all.filter(s => s.active !== false).sort((a, b) => a.number - b.number);
 }
 
+function itemOrderKey(i) {
+  return i.order ?? i.id;
+}
+
+function sortItems(list) {
+  return list.slice().sort((a, b) => itemOrderKey(a) - itemOrderKey(b) || a.id - b.id);
+}
+
 async function getActiveItems() {
   const all = await DB.getAll('items');
-  return all.filter(i => i.active !== false);
+  return sortItems(all.filter(i => i.active !== false));
+}
+
+async function moveItem(itemId, dir) {
+  const all = sortItems(await DB.getAll('items'));
+  const idx = all.findIndex(i => i.id === itemId);
+  const j = idx + dir;
+  if (idx < 0 || j < 0 || j >= all.length) return;
+  const before = new Map(all.map(i => [i.id, i.order]));
+  all.forEach((it, k) => { it.order = k; });
+  [all[idx].order, all[j].order] = [all[j].order, all[idx].order];
+  for (const it of all) {
+    if (it.order === before.get(it.id)) continue;
+    await DB.put('items', it);
+    Sync.pushItem(it);
+  }
 }
 
 async function getAssignmentsForDate(date) {
@@ -210,8 +234,11 @@ async function itemNameExists(name, excludeId = null) {
 
 async function addItemLocal(data) {
   const syncId = uid();
-  const id = await DB.add('items', { ...data, syncId });
-  Sync.pushItem({ ...data, id, syncId });
+  const existing = await DB.getAll('items');
+  const order = existing.reduce((m, i) => Math.max(m, itemOrderKey(i)), 0) + 1;
+  const row = { ...data, order, syncId };
+  const id = await DB.add('items', row);
+  Sync.pushItem({ ...row, id });
   return id;
 }
 
@@ -654,16 +681,20 @@ async function renderTeacherHome() {
   app.innerHTML = `
     <div class="screen teacher-home">
       ${teacherNav('home')}
-      <div class="form-row" style="margin-bottom:16px;">
+      <div class="day-nav">
+        <button class="mini-btn" id="homePrevBtn" type="button">◀ 前の日</button>
+        <strong class="day-title">${formatDateJp(targetDate)}（${['日', '月', '火', '水', '木', '金', '土'][new Date(targetDate + 'T00:00:00').getDay()]}）${isToday ? '＝今日' : ''}</strong>
+        <button class="mini-btn" id="homeNextBtn" type="button">次の日 ▶</button>
+      </div>
+      <div class="form-row" style="margin:0 0 16px;justify-content:center;">
         <input type="date" id="homeDateInput" value="${targetDate}">
-        <button class="mini-btn" id="homeGotoTodayBtn">今日にする</button>
-        <span style="color:#666;">${formatDateJp(targetDate)}${isToday ? '＝今日' : ''}</span>
+        <button class="mini-btn" id="homeGotoTodayBtn" type="button">今日にする</button>
       </div>
       <div class="summary-cards">
         <div class="sum-card">確認できた ${confirmedCount}/${targetCount}件</div>
         <div class="sum-card warn">未提出 ${unsubmittedCount}件</div>
         <div class="sum-card redo">直し ${redoCount}件</div>
-        <div class="sum-card over">期限超過 ${overCount}件</div>
+        <div class="sum-card over">提出期限を過ぎた ${overCount}件</div>
       </div>
       <section class="card">
         <h2>未提出一覧</h2>
@@ -675,6 +706,14 @@ async function renderTeacherHome() {
       </section>
     </div>
   `;
+  document.getElementById('homePrevBtn').addEventListener('click', () => {
+    teacherHomeDate = addDays(targetDate, -1);
+    renderTeacherHome();
+  });
+  document.getElementById('homeNextBtn').addEventListener('click', () => {
+    teacherHomeDate = addDays(targetDate, 1);
+    renderTeacherHome();
+  });
   document.getElementById('homeDateInput').addEventListener('change', (e) => {
     teacherHomeDate = e.target.value || todayStr();
     renderTeacherHome();
@@ -845,11 +884,11 @@ async function openItemActions(itemId, name) {
 }
 
 async function renderTeacherItems() {
-  const items = await DB.getAll('items');
+  const items = sortItems(await DB.getAll('items'));
   const students = await getActiveStudents();
   const assignments = await DB.getAll('assignments');
   const rowsArr = [];
-  for (const i of items) {
+  for (const [idx, i] of items.entries()) {
     const itemAssignments = assignments.filter(a => a.itemId === i.id);
     let submitted = 0, target = 0;
     for (const a of itemAssignments) {
@@ -866,6 +905,8 @@ async function renderTeacherItems() {
     <li class="t-row compact">
       <span class="t-name">${escapeHtml(i.name)}${i.active === false ? '（停止中）' : ''}</span>
       <span class="t-items">${rate === null ? '－' : rate + '%'}</span>
+      <button class="mini-btn" data-action="moveItem" data-id="${i.id}" data-dir="-1" ${idx === 0 ? 'disabled' : ''} aria-label="上へ">▲</button>
+      <button class="mini-btn" data-action="moveItem" data-id="${i.id}" data-dir="1" ${idx === items.length - 1 ? 'disabled' : ''} aria-label="下へ">▼</button>
       <button class="mini-btn" data-action="openItemActions" data-id="${i.id}" data-name="${escapeHtml(i.name)}">操作</button>
     </li>`);
   }
@@ -941,12 +982,38 @@ async function renderTeacherItems() {
 let teacherTodayDate = null;
 let teacherCalMonth = null;
 let teacherBulkOpen = false;
+let teacherCopyMode = false;
+const teacherCopyTargets = new Set();
 
 function selectTeacherDate(dateStr) {
   teacherTodayDate = dateStr;
   teacherCalMonth = dateStr.slice(0, 7);
   teacherBulkOpen = false;
+  teacherCopyMode = false;
+  teacherCopyTargets.clear();
   renderTeacherToday();
+}
+
+// 画面の位置を保ったまま再描画する（連続して登録するとき、上に戻されないように）。
+async function rerenderTodayKeepScroll() {
+  const y = window.scrollY;
+  await renderTeacherToday();
+  window.scrollTo(0, y);
+}
+
+async function copyAssignments(fromDate, toDates) {
+  const src = (await getAssignmentsForDate(fromDate)).filter(a => a.item && a.item.active !== false);
+  const existing = new Set((await DB.getAll('assignments')).map(a => `${a.date}_${a.itemId}`));
+  let count = 0;
+  for (const d of toDates) {
+    for (const a of src) {
+      if (existing.has(`${d}_${a.itemId}`)) continue;
+      await addAssignmentLocal({ date: d, itemId: a.itemId, deadline: null, detail: a.detail || '' });
+      existing.add(`${d}_${a.itemId}`);
+      count++;
+    }
+  }
+  return count;
 }
 
 function shiftMonthKey(monthKey, delta) {
@@ -960,7 +1027,7 @@ function mondayOf(dateStr) {
   return addDays(dateStr, wd === 0 ? -6 : 1 - wd);
 }
 
-function buildCalendarHtml(monthKey, selectedDate, countByDate, holidaySet) {
+function buildCalendarHtml(monthKey, selectedDate, countByDate, holidaySet, copyTargets) {
   const [y, m] = monthKey.split('-').map(Number);
   const startOffset = new Date(y, m - 1, 1).getDay();
   const daysInMonth = new Date(y, m, 0).getDate();
@@ -975,6 +1042,7 @@ function buildCalendarHtml(monthKey, selectedDate, countByDate, holidaySet) {
     const cls = ['cal-cell'];
     if (!isSchoolDay(ds, holidaySet)) cls.push('off');
     if (ds === selectedDate) cls.push('selected');
+    if (copyTargets && copyTargets.has(ds)) cls.push('copy-target');
     if (ds === today) cls.push('today');
     cells += `<button type="button" class="${cls.join(' ')}" data-cal-date="${ds}"><span class="cal-num">${d}</span>${cnt ? `<span class="cal-count">${cnt}</span>` : ''}</button>`;
   }
@@ -1004,39 +1072,27 @@ async function renderTeacherToday() {
   const countByDate = {};
   for (const a of allAssignments) countByDate[a.date] = (countByDate[a.date] || 0) + 1;
 
-  const pastDates = [...new Set(allAssignments.map(a => a.date))].filter(d => d < targetDate).sort();
-  const lastDate = pastDates[pastDates.length - 1];
-  const lastDateItemIds = new Set(allAssignments.filter(a => a.date === lastDate).map(a => a.itemId));
-
   const weekday = new Date(targetDate + 'T00:00:00').getDay();
   const weekdayNames = ['日', '月', '火', '水', '木', '金', '土'];
   const templates = await getMeta('weeklyTemplates', {});
-  const templateItemIds = new Set(templates[weekday] || []);
-  const preCheckIds = templateItemIds.size ? templateItemIds : lastDateItemIds;
 
-  const rows = items.map(i => {
-    if (assignedItemIds.has(i.id)) {
-      const a = assignmentByItemId[i.id];
-      return `
-    <li class="t-row">
-      <span class="t-name">${escapeHtml(i.name)}${a.detail ? '　' + escapeHtml(a.detail) : ''}</span>
-      <span class="tag-added">追加済み</span>${a.deadline ? deadlineBadge(a.deadline) : ''}
-      <button class="mini-btn" data-action="openItemRoster" data-assignment="${a.id}">一人ひとりを確認</button>
-      <button class="mini-btn" data-action="editAssignment" data-assignment="${a.id}">編集</button>
-      <button class="mini-btn danger" data-action="removeTodayAssignment" data-assignment="${a.id}" data-name="${escapeHtml(i.name)}">この日から外す</button>
-    </li>`;
+  // 登録済みのものを上に、未登録を下に並べる（それぞれ提出物の並び順のまま）。
+  const orderedItems = [...items].sort((a, b) => (assignedItemIds.has(b.id) ? 1 : 0) - (assignedItemIds.has(a.id) ? 1 : 0));
+  const tiles = orderedItems.map(i => {
+    const a = assignmentByItemId[i.id];
+    if (a) {
+      return `<button type="button" class="item-tile on" data-action="openAssignmentMenu" data-assignment="${a.id}">
+        <span class="tile-mark">✓</span>
+        <span class="tile-name">${escapeHtml(i.name)}</span>
+        ${a.detail ? `<span class="tile-detail">${escapeHtml(a.detail)}</span>` : ''}
+        ${a.deadline ? deadlineBadge(a.deadline) : ''}
+      </button>`;
     }
-    return `
-    <li class="t-row">
-      <label style="display:flex;align-items:center;gap:8px;">
-        <input type="checkbox" class="today-check" value="${i.id}" ${preCheckIds.has(i.id) ? 'checked' : ''}>
-        <span>${escapeHtml(i.name)}</span>
-      </label>
-      <input type="text" id="todayDetail_${i.id}" class="today-detail" data-item="${i.id}" placeholder="詳細（例：12ページ）" style="flex:1;min-width:100px;padding:6px 8px;border:1px solid var(--border);border-radius:8px;">
-      <button type="button" class="mini-btn" data-action="appendDetailWord" data-for="todayDetail_${i.id}" data-word="ページ">ページ</button>
-      <button type="button" class="mini-btn" data-action="appendDetailWord" data-for="todayDetail_${i.id}" data-word="番">番</button>
-    </li>`;
-  }).join('') || '<li class="empty-row">提出物がありません。「提出物の一覧・追加」から追加してください。</li>';
+    return `<button type="button" class="item-tile" data-tile-add="${i.id}">
+      <span class="tile-mark">＋</span>
+      <span class="tile-name">${escapeHtml(i.name)}</span>
+    </button>`;
+  }).join('') || '<p class="empty-row">提出物がありません。「提出物の一覧・追加」から追加してください。</p>';
 
   // 連絡帳は「次に提出物を集める日」に出すものを書くので、次の登校日の分から作る。
   const [nextSchool] = nextSchoolDays(addDays(targetDate, 1), 1, holidaySet);
@@ -1044,6 +1100,7 @@ async function renderTeacherToday() {
   const draftWd = weekdayNames[new Date(draftDate + 'T00:00:00').getDay()];
   const draftList = await getAssignmentsForDate(draftDate);
   const draftText = draftList.filter(a => a.item)
+    .sort((x, y) => itemOrderKey(x.item) - itemOrderKey(y.item))
     .map((a, idx) => (idx === 0 ? '宿　' : '　　') + a.item.name + (a.detail ? '　' + a.detail : ''))
     .join('\n');
 
@@ -1076,7 +1133,14 @@ async function renderTeacherToday() {
           <strong>${calY}年${calM}月</strong>
           <button class="mini-btn" id="calNext" type="button">▶</button>
         </div>
-        <div class="cal-grid">${buildCalendarHtml(monthKey, targetDate, countByDate, holidaySet)}</div>
+        ${teacherCopyMode ? `<div class="copy-banner">
+          <strong>${formatDateJp(targetDate)}の内容をコピーする日を、タップして選んでください</strong>（${teacherCopyTargets.size}日 選択中）
+          <div style="margin-top:8px;">
+            <button class="mini-btn primary" id="copyRunBtn" type="button" ${teacherCopyTargets.size ? '' : 'disabled'}>選んだ日にコピー</button>
+            <button class="mini-btn" id="copyCancelBtn" type="button">やめる</button>
+          </div>
+        </div>` : ''}
+        <div class="cal-grid">${buildCalendarHtml(monthKey, targetDate, countByDate, holidaySet, teacherCopyMode ? teacherCopyTargets : null)}</div>
         <p class="cal-legend">日付をタップするとその日の登録画面になります。数字は登録済みの提出物の数、グレーは土日・お休みの日です。</p>
       </section>
 
@@ -1091,13 +1155,13 @@ async function renderTeacherToday() {
           <button class="mini-btn" id="gotoTodayBtn" type="button">今日にする</button>
         </div>
         ${offNote}
-        <ul class="t-list">${rows}</ul>
-        <p style="color:#666;font-size:0.9rem;">チェックは、この曜日のテンプレート（設定していれば）または前回登録した日と同じものが最初から入っています。詳細（ページ・番号など）は任意で入力できます。</p>
-        <div style="margin-bottom:8px;">
-          <button class="mini-btn" id="checkAllBtn" type="button">すべて選択</button>
-          <button class="mini-btn" id="uncheckAllBtn" type="button">すべて解除</button>
+        <p class="cal-legend" style="margin:0 0 8px;">タップで登録できます（＋の提出物をタップ）。登録した提出物（緑）をタップすると、詳細（ページ・番号）や提出期限の入力、取り消しができます。</p>
+        <div class="tile-grid">${tiles}</div>
+        <div class="tile-tools">
+          <button class="mini-btn" id="copyPrevBtn" type="button">前の登録日と同じにする</button>
+          <button class="mini-btn" id="applyTemplateBtn" type="button">${weekdayNames[weekday]}曜日のテンプレートを入れる</button>
+          <button class="mini-btn" id="copyModeBtn" type="button" ${dateList.length ? '' : 'disabled'}>この日の内容を他の日にコピー</button>
         </div>
-        <button class="mini-btn primary" id="applyCheckedBtn" type="button">チェックしたものをこの日に追加</button>
       </section>
 
       <section class="card">
@@ -1132,7 +1196,13 @@ async function renderTeacherToday() {
   `;
 
   app.querySelectorAll('[data-cal-date]').forEach(btn => {
-    btn.addEventListener('click', () => selectTeacherDate(btn.dataset.calDate));
+    btn.addEventListener('click', () => {
+      const d = btn.dataset.calDate;
+      if (!teacherCopyMode) { selectTeacherDate(d); return; }
+      if (d === targetDate) return;
+      if (teacherCopyTargets.has(d)) teacherCopyTargets.delete(d); else teacherCopyTargets.add(d);
+      renderTeacherToday();
+    });
   });
   document.getElementById('calPrev').addEventListener('click', () => {
     teacherCalMonth = shiftMonthKey(monthKey, -1);
@@ -1164,23 +1234,59 @@ async function renderTeacherToday() {
       showToast('コピーしました');
     });
   }
-  document.getElementById('checkAllBtn').addEventListener('click', () => {
-    document.querySelectorAll('.today-check').forEach(el => { el.checked = true; });
+  app.querySelectorAll('[data-tile-add]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (btn.disabled) return;
+      btn.disabled = true;
+      const itemId = Number(btn.dataset.tileAdd);
+      const already = (await getAssignmentsForDate(targetDate)).some(a => a.itemId === itemId);
+      if (!already) await addAssignmentLocal({ date: targetDate, itemId, deadline: null, detail: '' });
+      await rerenderTodayKeepScroll();
+    });
   });
-  document.getElementById('uncheckAllBtn').addEventListener('click', () => {
-    document.querySelectorAll('.today-check').forEach(el => { el.checked = false; });
+  document.getElementById('copyPrevBtn').addEventListener('click', async () => {
+    const prevDates = [...new Set(allAssignments.map(a => a.date))].filter(d => d < targetDate).sort();
+    const prev = prevDates[prevDates.length - 1];
+    if (!prev) { showToast('これより前に登録した日がありません'); return; }
+    const n = await copyAssignments(prev, [targetDate]);
+    showToast(n ? `${formatDateJp(prev)}と同じ ${n}件を登録しました` : '追加するものはありません（登録済みです）');
+    await rerenderTodayKeepScroll();
   });
-  document.getElementById('applyCheckedBtn').addEventListener('click', async () => {
-    const checkedEls = [...document.querySelectorAll('.today-check:checked')];
-    for (const el of checkedEls) {
-      const itemId = Number(el.value);
-      const detailInput = document.querySelector(`.today-detail[data-item="${itemId}"]`);
-      const detail = detailInput ? detailInput.value.trim() : '';
-      await addAssignmentLocal({ date: targetDate, itemId, deadline: null, detail });
+  document.getElementById('applyTemplateBtn').addEventListener('click', async () => {
+    const activeIds = new Set(items.map(i => i.id));
+    let n = 0;
+    for (const id of (templates[weekday] || [])) {
+      if (!activeIds.has(id) || assignedItemIds.has(id)) continue;
+      await addAssignmentLocal({ date: targetDate, itemId: id, deadline: null, detail: '' });
+      n++;
     }
-    showToast(`${checkedEls.length}件 追加しました`);
+    showToast((templates[weekday] || []).length
+      ? (n ? `${n}件 登録しました` : '追加するものはありません（登録済みです）')
+      : `${weekdayNames[weekday]}曜日のテンプレートが未設定です（下の「まとめて登録」で設定できます）`);
+    await rerenderTodayKeepScroll();
+  });
+  document.getElementById('copyModeBtn').addEventListener('click', () => {
+    teacherCopyMode = true;
+    teacherCopyTargets.clear();
+    window.scrollTo(0, 0);
     renderTeacherToday();
   });
+  const copyRunBtn = document.getElementById('copyRunBtn');
+  if (copyRunBtn) {
+    copyRunBtn.addEventListener('click', async () => {
+      const targets = [...teacherCopyTargets].sort();
+      const n = await copyAssignments(targetDate, targets);
+      teacherCopyMode = false;
+      teacherCopyTargets.clear();
+      showToast(n ? `${targets.length}日に、${n}件 コピーしました` : 'コピーするものはありません（登録済みです）');
+      renderTeacherToday();
+    });
+    document.getElementById('copyCancelBtn').addEventListener('click', () => {
+      teacherCopyMode = false;
+      teacherCopyTargets.clear();
+      renderTeacherToday();
+    });
+  }
 
   const setRange = (start, end) => {
     document.getElementById('bulkStart').value = start;
@@ -1255,12 +1361,13 @@ function openAssignmentEditSheet(assignment, itemName) {
         <button type="button" class="mini-btn" data-action="appendDetailWord" data-for="editDetailInput" data-word="ページ">ページ</button>
         <button type="button" class="mini-btn" data-action="appendDetailWord" data-for="editDetailInput" data-word="番">番</button>
       </div>
-      <label style="display:block;margin:14px 0 4px;">期限</label>
+      <label style="display:block;margin:14px 0 4px;">提出期限（この日時までに出してもらう）</label>
       <input type="datetime-local" id="editDeadlineInput" value="${currentVal}" min="${minVal}" placeholder="${defaultVal}" class="deadline-input">
       <label style="display:flex;align-items:center;gap:6px;margin-top:8px;">
         <input type="checkbox" id="editDeadlineClear" ${assignment.deadline ? '' : 'checked'}>
-        <span>期限なし</span>
+        <span>提出期限を決めない</span>
       </label>
+      <p style="color:#666;font-size:0.85rem;margin:6px 0 0;">決めた場合、この日時を過ぎても出していない児童は、ホームの「提出期限を過ぎた」に数えられます。児童が自分で選ぶ「いつ出すか」の予定とは別のものです。</p>
     </div>
     <div class="sheet-buttons">
       <button class="big-btn yes" data-action="saveAssignmentEdit" data-assignment="${assignment.id}">保存</button>
@@ -2168,10 +2275,11 @@ async function handleAction(action, ds) {
       return;
     }
     case 'removeTodayAssignment': {
-      if (!confirm(`「${ds.name}」を今日の提出物から外します。この提出物についてのこれまでの記録も削除されます。よろしいですか？`)) return;
+      if (!confirm(`「${ds.name}」をこの日の提出物から外します。この提出物についてのこれまでの記録も削除されます。よろしいですか？`)) return;
       await removeAssignmentCascade(Number(ds.assignment));
+      closeModal();
       showToast('外しました');
-      renderTeacherToday();
+      await rerenderTodayKeepScroll();
       return;
     }
     case 'closeModalRefreshHome':
@@ -2237,6 +2345,25 @@ async function handleAction(action, ds) {
     case 'openItemActions':
       openItemActions(Number(ds.id), ds.name);
       return;
+    case 'moveItem':
+      await moveItem(Number(ds.id), Number(ds.dir));
+      renderTeacherItems();
+      return;
+    case 'openAssignmentMenu': {
+      const a = await DB.get('assignments', Number(ds.assignment));
+      const item = a ? await DB.get('items', a.itemId) : null;
+      if (!item) return;
+      renderModal(`
+        <h3>${escapeHtml(item.name)}${a.detail ? '　' + escapeHtml(a.detail) : ''}</h3>
+        <div class="sheet-buttons">
+          <button class="big-btn" data-action="editAssignment" data-assignment="${a.id}">詳細（ページ・番号）・提出期限を入れる</button>
+          <button class="big-btn" data-action="openItemRoster" data-assignment="${a.id}">一人ひとりの提出を確認</button>
+          <button class="big-btn cancel" data-action="removeTodayAssignment" data-assignment="${a.id}" data-name="${escapeHtml(item.name)}">この日の提出物から外す</button>
+          <button class="big-btn cancel" data-action="closeModal">閉じる</button>
+        </div>
+      `);
+      return;
+    }
     case 'toggleItemActive': {
       const it = await DB.get('items', Number(ds.id));
       it.active = it.active === false ? true : false;
