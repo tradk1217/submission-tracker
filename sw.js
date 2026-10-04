@@ -1,4 +1,4 @@
-const CACHE_NAME = 'submission-tracker-v29';
+const CACHE_NAME = 'submission-tracker-v31';
 const ASSETS = [
   './',
   './index.html',
