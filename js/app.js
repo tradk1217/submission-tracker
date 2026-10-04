@@ -44,6 +44,12 @@ function itemNamePlain(a) {
   return escapeHtml(a.item.name) + (a.detail ? `　${escapeHtml(a.detail)}` : '');
 }
 
+// コメントに「欠席」が入っていて、まだ出していない状態の人は、未提出に数えない。
+function isAbsent(status, comment) {
+  const notDone = status === STATUS.NOT_SUBMITTED || status === STATUS.IN_PROGRESS || status === STATUS.FORGOTTEN;
+  return notDone && !!comment && comment.includes('欠席');
+}
+
 function deadlineBadge(deadline) {
   const dl = deadlineState(deadline);
   if (!dl) return '';
@@ -640,7 +646,7 @@ async function renderTeacherHome() {
     const dl = deadlineState(a.deadline);
     for (const s of students) {
       const st = await getStatus(s.id, a.id);
-      if (st.status === STATUS.EXEMPT) continue;
+      if (st.status === STATUS.EXEMPT || isAbsent(st.status, st.comment)) continue;
       targetCount++;
       if (st.status === STATUS.SUBMITTED) confirmedCount++;
       if (![STATUS.SUBMITTED, STATUS.REDO, STATUS.RESUBMIT_WAIT].includes(st.status)) {
@@ -659,7 +665,7 @@ async function renderTeacherHome() {
       const dl = deadlineState(a.deadline);
       for (const s of students) {
         const st = await getStatus(s.id, a.id);
-        if (st.status !== STATUS.NOT_SUBMITTED || st.plannedDate) continue;
+        if (st.status !== STATUS.NOT_SUBMITTED || st.plannedDate || isAbsent(st.status, st.comment)) continue;
         targetCount++;
         unsubmittedCount++;
         if (!unsubmittedByStudent.has(s.id)) unsubmittedByStudent.set(s.id, { student: s, items: [] });
@@ -2057,24 +2063,28 @@ async function saveStudentComment(studentId, assignmentId, text) {
 function paintRoster() {
   const grid = document.getElementById('rosterGrid');
   if (!grid) return;
+  let absentCount = 0;
   grid.innerHTML = rosterState.students.map(s => {
-    const meta = STATUS_META[rosterState.statuses[s.id]];
+    const status = rosterState.statuses[s.id];
+    const meta = STATUS_META[status];
     const comment = rosterState.comments[s.id];
+    const absent = isAbsent(status, comment);
+    if (absent) absentCount++;
     return `<button type="button" class="roster-tile ${meta.cls}" data-action="rosterTile" data-student="${s.id}">
       <span class="rt-num">${s.number}${comment ? '<span class="rt-note">✎</span>' : ''}</span>
       <span class="rt-name">${escapeHtml(s.name)}</span>
-      <span class="rt-status">${meta.icon} ${meta.label}</span>
+      <span class="rt-status">${absent ? '– 欠席' : `${meta.icon} ${meta.label}`}</span>
       ${comment ? `<span class="rt-comment">${escapeHtml(comment)}</span>` : ''}
     </button>`;
   }).join('') || '<p>児童が登録されていません</p>';
   const c = {};
   for (const st of Object.values(rosterState.statuses)) c[st] = (c[st] || 0) + 1;
   const exempt = c[STATUS.EXEMPT] || 0;
-  const total = Object.keys(rosterState.statuses).length - exempt;
-  const notYet = (c[STATUS.NOT_SUBMITTED] || 0) + (c[STATUS.FORGOTTEN] || 0) + (c[STATUS.IN_PROGRESS] || 0);
+  const total = Object.keys(rosterState.statuses).length - exempt - absentCount;
+  const notYet = (c[STATUS.NOT_SUBMITTED] || 0) + (c[STATUS.FORGOTTEN] || 0) + (c[STATUS.IN_PROGRESS] || 0) - absentCount;
   const redo = (c[STATUS.REDO] || 0) + (c[STATUS.RESUBMIT_WAIT] || 0);
   const counts = document.getElementById('rosterCounts');
-  if (counts) counts.textContent = `出せた ${c[STATUS.SUBMITTED] || 0}／${total}人　まだ ${notYet}人　直し ${redo}人　免除 ${exempt}人`;
+  if (counts) counts.textContent = `出せた ${c[STATUS.SUBMITTED] || 0}／${total}人　まだ ${notYet}人　直し ${redo}人　免除 ${exempt}人　欠席 ${absentCount}人`;
   document.querySelectorAll('.brush-btn').forEach(b => b.classList.toggle('active', b.dataset.brush === rosterState.brush));
   const panel = document.getElementById('rosterCommentPanel');
   if (panel) panel.style.display = rosterState.brush === 'comment' ? 'block' : 'none';
@@ -2540,8 +2550,9 @@ async function handleAction(action, ds) {
       return;
     }
     case 'rosterAllSubmitted': {
-      const targets = rosterState.students.filter(s => rosterState.statuses[s.id] === STATUS.NOT_SUBMITTED);
-      if (!targets.length) { showToast('「まだ」の人はいません'); return; }
+      const targets = rosterState.students.filter(s =>
+        rosterState.statuses[s.id] === STATUS.NOT_SUBMITTED && !isAbsent(rosterState.statuses[s.id], rosterState.comments[s.id]));
+      if (!targets.length) { showToast('「まだ」の人はいません（欠席の人は除きます）'); return; }
       if (!confirm(`「まだ」の${targets.length}人を、全員「出せた」にします。よろしいですか？`)) return;
       for (const s of targets) rosterState.statuses[s.id] = STATUS.SUBMITTED;
       paintRoster();
