@@ -468,6 +468,20 @@ async function getHolidays() {
   return Array.isArray(list) ? list : [];
 }
 
+// 1日だけの登録と期間（date〜end）の登録を、日付ごとの集合にほどいて返す。
+async function getHolidaySet() {
+  const set = new Set();
+  for (const h of await getHolidays()) {
+    let d = h.date;
+    const end = h.end && h.end > h.date ? h.end : h.date;
+    for (let guard = 0; d <= end && guard < 400; guard++) {
+      set.add(d);
+      d = addDays(d, 1);
+    }
+  }
+  return set;
+}
+
 function isSchoolDay(dateStr, holidaySet) {
   const wd = new Date(dateStr + 'T00:00:00').getDay();
   if (wd === 0 || wd === 6) return false;
@@ -492,8 +506,7 @@ function nextSchoolDays(fromDateStr, count, holidaySet) {
 async function openPlanSheet(assignmentId, targetStatus) {
   const weekdayNames = ['日', '月', '火', '水', '木', '金', '土'];
   const labels = { 0: ['今日中', 'きょうじゅう'], 1: ['明日', 'あした'], 2: ['明後日', 'あさって'] };
-  const holidays = await getHolidays();
-  const holidaySet = new Set(holidays.map(h => h.date));
+  const holidaySet = await getHolidaySet();
   const candidates = nextSchoolDays(todayStr(), 3, holidaySet);
   const buttons = candidates.map(({ date, offset }) => {
     const wd = weekdayNames[new Date(date + 'T00:00:00').getDay()];
@@ -511,8 +524,7 @@ async function openPlanSheet(assignmentId, targetStatus) {
 }
 
 async function openPlanCustomDate(assignmentId, targetStatus) {
-  const holidays = await getHolidays();
-  const holidaySet = new Set(holidays.map(h => h.date));
+  const holidaySet = await getHolidaySet();
   const [minDate] = nextSchoolDays(todayStr(), 1, holidaySet).map(c => c.date);
   renderModal(`
     <h3>${rubyHtml('日付', 'ひづけ')}を${rubyHtml('選', 'えら')}ぶ</h3>
@@ -1002,6 +1014,40 @@ async function rerenderTodayKeepScroll() {
   window.scrollTo(0, y);
 }
 
+function shiftedSchoolDate(dateStr, dir, holidaySet) {
+  let d = dateStr;
+  for (let guard = 0; guard < 400; guard++) {
+    d = addDays(d, dir);
+    if (isSchoolDay(d, holidaySet)) return d;
+  }
+  return dateStr;
+}
+
+// fromDate以降の登録を、すべて1つ次（dir=1）／1つ前（dir=-1）の登校日へ動かす。
+// 提出状況・コメントは提出物に付いているので、そのまま一緒に動く。
+async function shiftAssignments(fromDate, dir) {
+  const holidaySet = await getHolidaySet();
+  const all = await DB.getAll('assignments');
+  const targets = all.filter(a => a.date >= fromDate)
+    .sort((a, b) => (dir > 0 ? -1 : 1) * (a.date.localeCompare(b.date) || a.id - b.id));
+  const occupied = new Set(all.map(a => `${a.date}_${a.itemId}`));
+  let moved = 0, skipped = 0;
+  for (const a of targets) {
+    const nd = shiftedSchoolDate(a.date, dir, holidaySet);
+    if (nd === a.date) continue;
+    const newKey = `${nd}_${a.itemId}`;
+    if (occupied.has(newKey)) { skipped++; continue; }
+    occupied.delete(`${a.date}_${a.itemId}`);
+    occupied.add(newKey);
+    a.date = nd;
+    await DB.put('assignments', a);
+    const item = await DB.get('items', a.itemId);
+    Sync.pushAssignment(a, item ? item.syncId : null);
+    moved++;
+  }
+  return { moved, skipped };
+}
+
 async function copyAssignments(fromDate, toDates) {
   const src = (await getAssignmentsForDate(fromDate)).filter(a => a.item && a.item.active !== false);
   const existing = new Set((await DB.getAll('assignments')).map(a => `${a.date}_${a.itemId}`));
@@ -1065,13 +1111,16 @@ async function renderTeacherToday() {
   const isToday = targetDate === todayStr();
   const items = await getActiveItems();
   const allAssignments = await DB.getAll('assignments');
-  const holidaySet = new Set((await getHolidays()).map(h => h.date));
+  const holidaySet = await getHolidaySet();
   const dateList = await getAssignmentsForDate(targetDate);
   const assignedItemIds = new Set(dateList.map(a => a.itemId));
   const assignmentByItemId = Object.fromEntries(dateList.map(a => [a.itemId, a]));
 
   const countByDate = {};
   for (const a of allAssignments) countByDate[a.date] = (countByDate[a.date] || 0) + 1;
+  const laterAssignments = allAssignments.filter(a => a.date >= targetDate);
+  const laterCount = laterAssignments.length;
+  const laterDayCount = new Set(laterAssignments.map(a => a.date)).size;
 
   const weekday = new Date(targetDate + 'T00:00:00').getDay();
   const weekdayNames = ['日', '月', '火', '水', '木', '金', '土'];
@@ -1162,6 +1211,11 @@ async function renderTeacherToday() {
           <button class="mini-btn" id="copyPrevBtn" type="button">前の登録日と同じにする</button>
           <button class="mini-btn" id="applyTemplateBtn" type="button">${weekdayNames[weekday]}曜日のテンプレートを入れる</button>
           <button class="mini-btn" id="copyModeBtn" type="button" ${dateList.length ? '' : 'disabled'}>この日の内容を他の日にコピー</button>
+        </div>
+        <div class="tile-tools" style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);align-items:center;">
+          <span style="font-size:0.85rem;color:var(--muted);">予定がずれたとき：</span>
+          <button class="mini-btn" id="shiftLaterBtn" type="button" ${laterCount ? '' : 'disabled'}>この日以降をまとめて1日遅らせる</button>
+          <button class="mini-btn" id="shiftEarlierBtn" type="button" ${laterCount ? '' : 'disabled'}>この日以降をまとめて1日早める</button>
         </div>
       </section>
 
@@ -1266,6 +1320,15 @@ async function renderTeacherToday() {
       : `${weekdayNames[weekday]}曜日のテンプレートが未設定です（下の「まとめて登録」で設定できます）`);
     await rerenderTodayKeepScroll();
   });
+  const runShift = async (dir) => {
+    const word = dir > 0 ? '遅らせ' : '早め';
+    if (!confirm(`${formatDateJp(targetDate)}以降に登録されている${laterDayCount}日分・${laterCount}件を、それぞれ1つ${dir > 0 ? '後' : '前'}の登校日（土日・お休みの日は飛ばします）に${word}ます。提出状況やコメントも一緒に動きます。よろしいですか？`)) return;
+    const { moved, skipped } = await shiftAssignments(targetDate, dir);
+    showToast(`${moved}件を${dir > 0 ? '1日遅らせ' : '1日早め'}ました${skipped ? `（同じ提出物がすでにある${skipped}件は動かしていません）` : ''}`);
+    await rerenderTodayKeepScroll();
+  };
+  document.getElementById('shiftLaterBtn').addEventListener('click', () => runShift(1));
+  document.getElementById('shiftEarlierBtn').addEventListener('click', () => runShift(-1));
   document.getElementById('copyModeBtn').addEventListener('click', () => {
     teacherCopyMode = true;
     teacherCopyTargets.clear();
@@ -1450,33 +1513,47 @@ async function renderHolidayCard() {
   const holidays = (await getHolidays()).slice().sort((a, b) => a.date.localeCompare(b.date));
   card.innerHTML = `
     <h2>お休みの日（祝日・学校行事など）</h2>
-    <p style="color:#666;font-size:0.9rem;">土日は自動的に選択肢から外れます。祝日や学校のお休みなど、それ以外の日をここに追加すると、児童の「いつ出す」の選択肢から外れます。</p>
-    <div class="form-row" style="margin-bottom:12px;">
+    <p style="color:#666;font-size:0.9rem;">土日は自動的に選択肢から外れます。祝日や学校のお休みなど、それ以外の日をここに追加すると、児童の「いつ出す」の選択肢から外れ、カレンダーでもグレーになります。夏休みなどは、期間でまとめて登録できます。</p>
+    <div class="form-row" style="margin-bottom:6px;align-items:center;">
       <input type="date" id="newHolidayDate" style="padding:8px;border:1px solid var(--border);border-radius:8px;">
-      <input type="text" id="newHolidayLabel" placeholder="名前（任意・例：運動会）" style="flex:1;min-width:120px;padding:8px;border:1px solid var(--border);border-radius:8px;">
+      <span>〜</span>
+      <input type="date" id="newHolidayEnd" style="padding:8px;border:1px solid var(--border);border-radius:8px;">
+    </div>
+    <p style="color:#666;font-size:0.8rem;margin:0 0 8px;">1日だけの場合は、右側（終わりの日）は空のままで大丈夫です。</p>
+    <div class="form-row" style="margin-bottom:12px;">
+      <input type="text" id="newHolidayLabel" placeholder="名前（任意・例：夏休み）" style="flex:1;min-width:120px;padding:8px;border:1px solid var(--border);border-radius:8px;">
       <button class="mini-btn primary" id="addHolidayBtn" type="button">追加</button>
     </div>
     <ul class="t-list" id="holidayList">
       ${holidays.map(h => `
-        <li class="t-row" data-date="${escapeHtml(h.date)}">
-          <span class="t-name">${formatDateJp(h.date)}${h.label ? '　' + escapeHtml(h.label) : ''}</span>
-          <button class="mini-btn danger" data-action="removeHoliday" data-date="${escapeHtml(h.date)}" type="button">削除</button>
+        <li class="t-row">
+          <span class="t-name">${formatDateJp(h.date)}${h.end && h.end > h.date ? '〜' + formatDateJp(h.end) : ''}${h.label ? '　' + escapeHtml(h.label) : ''}</span>
+          <button class="mini-btn danger" data-action="removeHoliday" data-date="${escapeHtml(h.date)}" data-end="${escapeHtml(h.end || '')}" type="button">削除</button>
         </li>
       `).join('') || '<li class="empty-row">登録されていません</li>'}
     </ul>
   `;
   document.getElementById('addHolidayBtn').addEventListener('click', async () => {
     const dateVal = document.getElementById('newHolidayDate').value;
-    if (!dateVal) return;
+    const endVal = document.getElementById('newHolidayEnd').value;
+    if (!dateVal) {
+      alert('はじめの日を選んでください。');
+      return;
+    }
+    if (endVal && endVal < dateVal) {
+      alert('終わりの日は、はじめの日より後の日を選んでください。');
+      return;
+    }
     const label = document.getElementById('newHolidayLabel').value.trim();
-    const next = holidays.filter(h => h.date !== dateVal);
-    next.push({ date: dateVal, label });
+    const end = endVal && endVal > dateVal ? endVal : '';
+    const next = holidays.filter(h => !(h.date === dateVal && (h.end || '') === end));
+    next.push(end ? { date: dateVal, end, label } : { date: dateVal, label });
     await setMeta('holidays', next);
     renderHolidayCard();
   });
   card.querySelectorAll('[data-action="removeHoliday"]').forEach(btn => {
     btn.addEventListener('click', async () => {
-      const next = holidays.filter(h => h.date !== btn.dataset.date);
+      const next = holidays.filter(h => !(h.date === btn.dataset.date && (h.end || '') === btn.dataset.end));
       await setMeta('holidays', next);
       renderHolidayCard();
     });
@@ -2230,8 +2307,7 @@ async function handleAction(action, ds) {
     case 'pickPlanDateCustom': {
       const dateVal = document.getElementById('customPlanDate').value;
       if (!dateVal) return;
-      const holidays = await getHolidays();
-      const holidaySet = new Set(holidays.map(h => h.date));
+      const holidaySet = await getHolidaySet();
       if (!isSchoolDay(dateVal, holidaySet)) {
         alert('土日やお休みの日は選べません。学校がある日を選んでください。');
         return;
