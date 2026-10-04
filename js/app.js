@@ -202,6 +202,7 @@ async function setStatus(studentId, assignmentId, status, actor, plannedDate) {
     plannedDate: status === STATUS.SUBMITTED ? null : (plannedDate !== undefined ? plannedDate : (existing ? existing.plannedDate : null)),
     updatedAt: new Date().toISOString(),
     updatedBy: actor,
+    ...(existing && existing.comment ? { comment: existing.comment } : {}),
   };
   await DB.put('statuses', row);
   const fsId = uid();
@@ -1902,6 +1903,7 @@ function openStudentQuick(studentId, date) {
       rowsHtml.push(`
         <div class="quick-item">
           <div class="quick-item-name">${itemNamePlain(a)}${carried ? `<span class="dl-badge dl-over">${formatDateJp(a.date)}の分</span>` : ''}（${STATUS_META[st.status].label}）</div>
+          ${st.comment ? `<div class="quick-comment">✎ ${escapeHtml(st.comment)}</div>` : ''}
           <div class="quick-item-actions">
             ${isSubmitted
               ? `<button class="mini-btn" data-action="teacherSetStatus" data-status="${STATUS.REDO}" data-assignment="${a.id}" data-student="${studentId}">直しにする</button>
@@ -1921,34 +1923,85 @@ function openStudentQuick(studentId, date) {
   });
 }
 
+const ROSTER_BRUSHES = [
+  { status: STATUS.SUBMITTED, label: '出せた' },
+  { status: STATUS.REDO, label: '直し' },
+  { status: STATUS.EXEMPT, label: '免除' },
+  { status: STATUS.FORGOTTEN, label: '忘れた' },
+  { status: STATUS.IN_PROGRESS, label: '途中' },
+  { status: STATUS.NOT_SUBMITTED, label: 'まだ（取り消す）' },
+  { status: 'comment', label: 'コメント' },
+];
+
+// 提出状況の一括登録モーダルの状態。タップするたびに即保存し、画面だけを部分的に更新する。
+const rosterState = { assignmentId: null, students: [], statuses: {}, comments: {}, brush: STATUS.SUBMITTED };
+
+async function openRosterComment(studentId) {
+  const student = rosterState.students.find(s => s.id === studentId);
+  const assignment = await DB.get('assignments', rosterState.assignmentId);
+  const item = await DB.get('items', assignment.itemId);
+  renderModal(`
+    <h3>${student.number}番 ${escapeHtml(student.name)}さん</h3>
+    <p style="margin:0 0 8px;color:#666;">${escapeHtml(item.name)}${assignment.detail ? '　' + escapeHtml(assignment.detail) : ''} へのコメント</p>
+    <textarea id="rosterCommentInput" rows="4" style="width:100%;padding:10px;border:1px solid var(--border);border-radius:8px;font-size:1rem;font-family:inherit;user-select:text;-webkit-user-select:text;">${escapeHtml(rosterState.comments[studentId] || '')}</textarea>
+    <div style="margin-top:6px;">
+      ${['よくできました', 'ページぬけ', '名前がない', '字をていねいに', 'やり直し'].map(w =>
+        `<button type="button" class="mini-btn" data-action="appendCommentWord" data-word="${w}">${w}</button>`).join('')}
+    </div>
+    <p style="color:#666;font-size:0.8rem;margin:8px 0 0;">コメントはこの端末だけに保存され、クラウド同期や児童画面には出ません。空にして保存すると消えます。</p>
+    <div class="sheet-buttons">
+      <button class="big-btn yes" data-action="saveRosterComment" data-student="${studentId}">保存</button>
+      <button class="big-btn cancel" data-action="rosterBackToList">もどる</button>
+    </div>
+  `);
+}
+
+function paintRoster() {
+  const grid = document.getElementById('rosterGrid');
+  if (!grid) return;
+  grid.innerHTML = rosterState.students.map(s => {
+    const meta = STATUS_META[rosterState.statuses[s.id]];
+    const hasComment = !!rosterState.comments[s.id];
+    return `<button type="button" class="roster-tile ${meta.cls}" data-action="rosterTile" data-student="${s.id}">
+      <span class="rt-num">${s.number}${hasComment ? '<span class="rt-note">✎</span>' : ''}</span>
+      <span class="rt-name">${escapeHtml(s.name)}</span>
+      <span class="rt-status">${meta.icon} ${meta.label}</span>
+    </button>`;
+  }).join('') || '<p>児童が登録されていません</p>';
+  const c = {};
+  for (const st of Object.values(rosterState.statuses)) c[st] = (c[st] || 0) + 1;
+  const exempt = c[STATUS.EXEMPT] || 0;
+  const total = Object.keys(rosterState.statuses).length - exempt;
+  const notYet = (c[STATUS.NOT_SUBMITTED] || 0) + (c[STATUS.FORGOTTEN] || 0) + (c[STATUS.IN_PROGRESS] || 0);
+  const redo = (c[STATUS.REDO] || 0) + (c[STATUS.RESUBMIT_WAIT] || 0);
+  const counts = document.getElementById('rosterCounts');
+  if (counts) counts.textContent = `出せた ${c[STATUS.SUBMITTED] || 0}／${total}人　まだ ${notYet}人　直し ${redo}人　免除 ${exempt}人`;
+  document.querySelectorAll('.brush-btn').forEach(b => b.classList.toggle('active', b.dataset.brush === rosterState.brush));
+}
+
 async function openItemRoster(assignmentId) {
   const assignment = await DB.get('assignments', assignmentId);
   const item = await DB.get('items', assignment.itemId);
   const students = await getActiveStudents();
-  const rowsHtml = [];
+  rosterState.assignmentId = assignmentId;
+  rosterState.students = students;
+  rosterState.statuses = {};
+  rosterState.comments = {};
   for (const s of students) {
     const st = await getStatus(s.id, assignmentId);
-    const isSubmitted = st.status === STATUS.SUBMITTED;
-    const isRedo = st.status === STATUS.REDO || st.status === STATUS.RESUBMIT_WAIT;
-    rowsHtml.push(`
-      <div class="quick-item">
-        <div class="quick-item-name">${s.number}番 ${escapeHtml(s.name)}（${STATUS_META[st.status].label}）</div>
-        <div class="quick-item-actions">
-          ${isSubmitted ? `<button class="mini-btn" data-action="teacherSetStatus" data-status="${STATUS.REDO}" data-assignment="${assignmentId}" data-student="${s.id}">直しにする</button>` : ''}
-          ${isRedo ? `<button class="mini-btn primary" data-action="teacherSetStatus" data-status="${STATUS.SUBMITTED}" data-assignment="${assignmentId}" data-student="${s.id}">確認OK</button>` : ''}
-          ${!isSubmitted && !isRedo ? `
-            <button class="mini-btn primary" data-action="teacherSetStatus" data-status="${STATUS.SUBMITTED}" data-assignment="${assignmentId}" data-student="${s.id}">提出済</button>
-            <button class="mini-btn" data-action="teacherSetStatus" data-status="${STATUS.FORGOTTEN}" data-assignment="${assignmentId}" data-student="${s.id}">忘れ</button>
-            <button class="mini-btn" data-action="teacherSetStatus" data-status="${STATUS.EXEMPT}" data-assignment="${assignmentId}" data-student="${s.id}">免除</button>
-          ` : ''}
-        </div>
-      </div>`);
+    rosterState.statuses[s.id] = st.status;
+    if (st.comment) rosterState.comments[s.id] = st.comment;
   }
   renderModal(`
-    <h3>${escapeHtml(item.name)} ${deadlineBadge(assignment.deadline)}</h3>
-    ${rowsHtml.join('') || '<p>児童が登録されていません</p>'}
-    <button class="big-btn cancel" data-action="closeModalRefreshToday">閉じる</button>
+    <h3>${escapeHtml(item.name)}${assignment.detail ? '　' + escapeHtml(assignment.detail) : ''} ${deadlineBadge(assignment.deadline)}</h3>
+    <p class="cal-legend" style="margin:0 0 8px;text-align:left;">① 下から、つけたい状態を選びます。② 児童をタップすると、その状態になります。続けて何人でもタップできます。</p>
+    <div class="brush-bar">${ROSTER_BRUSHES.map(b => `<button type="button" class="brush-btn" data-action="rosterBrush" data-brush="${b.status}">${b.label}</button>`).join('')}</div>
+    <button type="button" class="mini-btn" data-action="rosterAllSubmitted" style="margin:8px 0;">まだの人を全員「出せた」にする</button>
+    <p id="rosterCounts" class="roster-counts"></p>
+    <div id="rosterGrid" class="roster-grid"></div>
+    <button class="big-btn cancel" data-action="closeModalRefreshToday" style="margin-top:12px;">閉じる</button>
   `);
+  paintRoster();
 }
 
 async function openRedoQuick(studentId) {
@@ -1962,6 +2015,7 @@ async function openRedoQuick(studentId) {
     rowsHtml.push(`
       <div class="quick-item">
         <div class="quick-item-name">${itemNamePlain(a)}（${STATUS_META[st.status].label}）</div>
+        ${st.comment ? `<div class="quick-comment">✎ ${escapeHtml(st.comment)}</div>` : ''}
         <div class="quick-item-actions">
           <button class="mini-btn primary" data-action="teacherSetStatus" data-status="${STATUS.SUBMITTED}" data-assignment="${a.id}" data-student="${studentId}">確認OK（提出済に）</button>
           <button class="mini-btn" data-action="teacherSetStatus" data-status="${STATUS.REDO}" data-assignment="${a.id}" data-student="${studentId}">直しに戻す</button>
@@ -2345,6 +2399,54 @@ async function handleAction(action, ds) {
     case 'openItemActions':
       openItemActions(Number(ds.id), ds.name);
       return;
+    case 'rosterBrush':
+      rosterState.brush = ds.brush;
+      paintRoster();
+      return;
+    case 'rosterTile': {
+      const studentId = Number(ds.student);
+      const status = rosterState.brush;
+      if (status === 'comment') {
+        await openRosterComment(studentId);
+        return;
+      }
+      if (rosterState.statuses[studentId] === status) return;
+      rosterState.statuses[studentId] = status;
+      paintRoster();
+      await setStatus(studentId, rosterState.assignmentId, status, 'teacher', status === STATUS.NOT_SUBMITTED ? null : undefined);
+      return;
+    }
+    case 'appendCommentWord': {
+      const input = document.getElementById('rosterCommentInput');
+      if (!input) return;
+      input.value = input.value.trim() ? `${input.value.trim()}、${ds.word}` : ds.word;
+      input.focus();
+      return;
+    }
+    case 'rosterBackToList':
+      await openItemRoster(rosterState.assignmentId);
+      return;
+    case 'saveRosterComment': {
+      const studentId = Number(ds.student);
+      const text = document.getElementById('rosterCommentInput').value.trim();
+      const st = await getStatus(studentId, rosterState.assignmentId);
+      if (text) st.comment = text; else delete st.comment;
+      if (!text && st.status === STATUS.NOT_SUBMITTED && !st.updatedAt) await DB.delete('statuses', st.key);
+      else await DB.put('statuses', st);
+      showToast(text ? 'コメントを保存しました' : 'コメントを消しました');
+      await openItemRoster(rosterState.assignmentId);
+      return;
+    }
+    case 'rosterAllSubmitted': {
+      const targets = rosterState.students.filter(s => rosterState.statuses[s.id] === STATUS.NOT_SUBMITTED);
+      if (!targets.length) { showToast('「まだ」の人はいません'); return; }
+      if (!confirm(`「まだ」の${targets.length}人を、全員「出せた」にします。よろしいですか？`)) return;
+      for (const s of targets) rosterState.statuses[s.id] = STATUS.SUBMITTED;
+      paintRoster();
+      for (const s of targets) await setStatus(s.id, rosterState.assignmentId, STATUS.SUBMITTED, 'teacher');
+      showToast(`${targets.length}人を「出せた」にしました`);
+      return;
+    }
     case 'moveItem':
       await moveItem(Number(ds.id), Number(ds.dir));
       renderTeacherItems();

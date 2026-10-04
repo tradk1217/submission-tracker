@@ -229,6 +229,9 @@ export async function startSync() {
         updatedAt: data.updatedAt, updatedBy: data.updatedBy,
         ...(localAssignmentId ? {} : { _pendingAssignmentSyncId: data.assignmentSyncId }),
       };
+      // コメントはこの端末だけに保存する（自由記述に氏名が入っても外に出ないように、同期しない）。
+      const prev = await DB.get('statuses', key);
+      if (prev && prev.comment) row.comment = prev.comment;
       await DB.put('statuses', row);
     }
     notify();
