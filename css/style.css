@@ -52,6 +52,12 @@ html, body {
   box-shadow: 0 3px 0 #1a4d80;
 }
 .num-btn:active { transform: translateY(2px); box-shadow: none; }
+.num-btn.done { background: #1a7f37; box-shadow: 0 3px 0 #0f5a25; position: relative; }
+.num-btn.done::after { content: "✓"; position: absolute; top: 4px; right: 8px; font-size: 1rem; }
+.num-btn.absent { background: #9aa0a6; box-shadow: 0 3px 0 #6f757b; }
+.select-progress { text-align: center; font-size: 1.1rem; margin: -8px 0 14px; color: var(--muted); }
+.quick-wrap { margin-top: 24px; }
+.big-btn.quick { background: var(--ok); width: min(440px, 100%); font-size: 1.7rem; padding: 26px 20px; }
 
 .teacher-link {
   display: block;
@@ -205,6 +211,7 @@ html, body {
   transform: scale(0.85);
   transition: opacity 0.3s ease, transform 0.3s ease;
 }
+.celebration-overlay { pointer-events: none; }
 .celebration-overlay.show { opacity: 1; transform: scale(1); }
 .celebration-box {
   color: white;
@@ -441,6 +448,17 @@ html, body {
 .comment-panel { margin: 8px 0; padding: 8px; background: #fff9e6; border: 1px solid var(--mid); border-radius: 10px; }
 .item-comment { display: block; margin-top: 4px; font-size: 0.9rem; color: #7a5b00; font-weight: normal; }
 .quick-comment { color: #7a5b00; background: #fff6e0; border-radius: 6px; padding: 4px 8px; margin: 4px 0 6px; font-size: 0.85rem; white-space: pre-wrap; }
+
+.setup-qr-overlay { position: fixed; inset: 0; background: white; z-index: 300; overflow: auto; padding: 16px; }
+.setup-qr-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 12px; margin-top: 12px; }
+.setup-qr-card { border: 1px dashed #999; padding: 8px; text-align: center; break-inside: avoid; }
+.setup-qr-card canvas { width: 150px; height: 150px; }
+.setup-qr-card .sq-name { font-size: 0.95rem; font-weight: bold; margin-top: 4px; }
+@media print {
+  body > *:not(#setupQrOverlay) { display: none !important; }
+  .setup-qr-overlay { position: static; overflow: visible; padding: 0; }
+  .setup-qr-bar { display: none; }
+}
 
 .tmpl-scroll { overflow-x: auto; }
 .tmpl-table { border-collapse: collapse; width: 100%; }
