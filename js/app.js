@@ -66,6 +66,7 @@ const state = {
   pendingStudentId: null,
   modal: null,
   teacherTab: 'home',
+  solo: false, // 1人1台：この端末が特定の児童専用かどうか
   inactivityTimer: null,
   pending: new Map(), // assignmentId -> {status, plannedDate} 「登録する」で確定させるまでの仮の選択
 };
@@ -103,7 +104,8 @@ function goto(screen, extra = {}) {
 
 function resetInactivityTimer() {
   if (state.inactivityTimer) clearTimeout(state.inactivityTimer);
-  if (state.screen === 'childPage' || state.screen === 'childConfirm') {
+  // 1人1台のときは、自分の画面のままにしておく（番号選択には戻らない）。
+  if (!state.solo && (state.screen === 'childPage' || state.screen === 'childConfirm')) {
     state.inactivityTimer = setTimeout(async () => {
       await commitPending();
       goto('childSelect');
@@ -129,11 +131,11 @@ function showCelebration() {
   el.innerHTML = `<div class="celebration-box">🎉<br>${rubyHtml('全部', 'ぜんぶ')}${rubyHtml('出', 'だ')}せたね！<br>えらい！</div>`;
   document.body.appendChild(el);
   requestAnimationFrame(() => el.classList.add('show'));
-  el.addEventListener('click', () => { el.classList.remove('show'); setTimeout(() => el.remove(), 300); });
+  // 次の児童がすぐ操作できるよう、画面は短く表示し、触れても邪魔にならないようにする。
   setTimeout(() => {
     el.classList.remove('show');
-    setTimeout(() => el.remove(), 400);
-  }, 2400);
+    setTimeout(() => el.remove(), 300);
+  }, 1300);
 }
 
 // ---------- データ取得ヘルパー ----------
@@ -277,14 +279,43 @@ async function deleteItemCascade(itemId) {
 
 // ---------- 児童モード ----------
 
+// 今日の提出物について、すべて確認が終わった児童（と、欠席の児童）を調べる。
+// 全員分を何度も読み込まないよう、提出状況は最初に1回だけ読む。
+async function getFinishedStudents(students) {
+  const today = todayStr();
+  const assignments = (await getAllAssignmentsWithItems()).filter(a => a.item && a.date <= today);
+  const finished = new Set();
+  const absent = new Set();
+  if (!assignments.some(a => a.date === today)) return { finished, absent };
+  const map = new Map((await DB.getAll('statuses')).map(s => [s.key, s]));
+  for (const s of students) {
+    let untouched = false, isAbs = false;
+    for (const a of assignments) {
+      const st = map.get(`${s.id}_${a.id}`);
+      const status = st ? st.status : STATUS.NOT_SUBMITTED;
+      if (isAbsent(status, st && st.comment)) { isAbs = true; continue; }
+      if (status === STATUS.NOT_SUBMITTED) { untouched = true; break; }
+    }
+    if (untouched) continue;
+    (isAbs ? absent : finished).add(s.id);
+  }
+  return { finished, absent };
+}
+
 async function renderChildSelect() {
   const students = await getActiveStudents();
+  const { finished, absent } = await getFinishedStudents(students);
   const panels = students.map(s => `
-    <button class="num-btn" data-action="pickStudent" data-id="${s.id}">${s.number}</button>
+    <button class="num-btn ${finished.has(s.id) ? 'done' : absent.has(s.id) ? 'absent' : ''}" data-action="pickStudent" data-id="${s.id}">${s.number}</button>
   `).join('');
+  const remaining = students.length - finished.size - absent.size;
+  const progress = (finished.size || absent.size)
+    ? `<p class="select-progress">${rubyHtml('済', 'す')}み ${finished.size}${rubyHtml('人', 'にん')}　${rubyHtml('残', 'のこ')}り ${remaining}${rubyHtml('人', 'にん')}</p>`
+    : '';
   app.innerHTML = `
     <div class="screen child-select">
       <h1 class="page-title">${rubyHtml('出席番号', 'しゅっせきばんごう')}を ${rubyHtml('押', 'お')}してね</h1>
+      ${progress}
       <div class="num-grid">${panels || '<p class="empty">児童が登録されていません</p>'}</div>
       <button class="teacher-link" data-action="goTeacherPin">教師用</button>
     </div>
@@ -294,13 +325,16 @@ async function renderChildSelect() {
 async function renderChildConfirm() {
   const student = await DB.get('students', state.pendingStudentId);
   if (!student) { goto('childSelect'); return; }
+  const { todayRows } = await getChildRows(student.id);
+  const hasUntouched = todayRows.some(({ eff }) => eff === STATUS.NOT_SUBMITTED);
   app.innerHTML = `
     <div class="screen child-confirm">
       <p class="confirm-lead">この${rubyHtml('番号', 'ばんごう')}で</p>
       <div class="confirm-name">${student.number}${rubyHtml('番', 'ばん')} ${rubyHtml(student.name, student.kana)}</div>
       <p class="confirm-lead">${rubyHtml('間違', 'まちが')}いないですか？</p>
+      ${hasUntouched ? `<div class="quick-wrap"><button class="big-btn quick" data-action="confirmAllSubmitted">はい・${rubyHtml('全部', 'ぜんぶ')}${rubyHtml('出', 'だ')}せた</button></div>` : ''}
       <div class="confirm-buttons">
-        <button class="big-btn yes" data-action="confirmStudent">${rubyHtml('はい', '')}</button>
+        <button class="big-btn ${hasUntouched ? '' : 'yes'}" data-action="confirmStudent">${hasUntouched ? `はい・${rubyHtml('選', 'えら')}ぶ` : rubyHtml('はい', '')}</button>
         <button class="big-btn no" data-action="cancelStudent">${rubyHtml('違', 'ちが')}う</button>
       </div>
     </div>
@@ -314,6 +348,7 @@ async function getChildRows(studentId) {
   const today = todayStr();
   const allAssignments = await getAllAssignmentsWithItems();
   const todayRows = [];
+  const doneRows = [];
   const redoRows = [];
   const laterRows = [];
   for (const a of allAssignments) {
@@ -321,10 +356,14 @@ async function getChildRows(studentId) {
     const st = await getStatus(studentId, a.id);
     const eff = effectiveStatus(a.id, st.status);
     if (eff === STATUS.REDO || eff === STATUS.RESUBMIT_WAIT) {
-      redoRows.push({ a, st });
+      redoRows.push({ a, st, eff });
       continue;
     }
-    if (eff === STATUS.SUBMITTED || eff === STATUS.EXEMPT) continue;
+    if (eff === STATUS.SUBMITTED || eff === STATUS.EXEMPT) {
+      // 今日の分は、済んだものも画面に残す（まちがえたとき、自分で直せるように）。
+      if (a.date === today) doneRows.push({ a, st, eff });
+      continue;
+    }
     if (st.plannedDate && eff !== STATUS.NOT_SUBMITTED) {
       laterRows.push({ a, st });
       continue;
@@ -334,14 +373,31 @@ async function getChildRows(studentId) {
       todayRows.push({ a, st, eff, overdue: a.date < today });
     }
   }
-  return { todayRows, redoRows, laterRows };
+  return { todayRows, doneRows, redoRows, laterRows };
+}
+
+// 仮の選択をすべて確定して、児童の番号選択画面に戻る。今日の分がすべて済んだらお祝いを出す。
+async function registerAndFinish() {
+  const studentId = state.studentId;
+  const { todayRows } = await getChildRows(studentId);
+  const assignmentIds = new Set([...todayRows.map(({ a }) => a.id), ...state.pending.keys()]);
+  await commitPending();
+  closeModal();
+  let allDone = assignmentIds.size > 0;
+  for (const id of assignmentIds) {
+    const st = await getStatus(studentId, id);
+    if (st.status !== STATUS.SUBMITTED && st.status !== STATUS.EXEMPT) { allDone = false; break; }
+  }
+  if (allDone) showCelebration(); else showToast('登録したよ！');
+  goto(state.solo ? 'childPage' : 'childSelect');
 }
 
 async function renderChildPage() {
   const student = await DB.get('students', state.studentId);
   if (!student) { goto('childSelect'); return; }
 
-  const { todayRows, redoRows, laterRows } = await getChildRows(student.id);
+  const { todayRows, doneRows, redoRows, laterRows } = await getChildRows(student.id);
+  const shownRows = [...todayRows, ...doneRows].sort((x, y) => x.a.date.localeCompare(y.a.date) || itemOrderKey(x.a.item) - itemOrderKey(y.a.item));
 
   const history = await getStudentStatuses(student.id);
   const submittedCount = history.filter(h => h.status === STATUS.SUBMITTED).length;
@@ -349,12 +405,15 @@ async function renderChildPage() {
   const forgottenAssignments = new Set(histAll.filter(h => h.status === STATUS.FORGOTTEN).map(h => h.assignmentId));
 
   const hasUntouched = todayRows.some(({ a, eff }) => eff === STATUS.NOT_SUBMITTED);
-  const todayHtml = todayRows.length ? todayRows.map(({ a, eff, overdue }) => {
+  const todayHtml = shownRows.length ? shownRows.map(({ a, eff, overdue }) => {
     const meta = STATUS_META[eff];
     const isPending = state.pending.has(a.id);
     const clickable = isPending || (eff !== STATUS.SUBMITTED && eff !== STATUS.EXEMPT);
     const dateNote = overdue ? `<span class="dl-badge dl-over">${formatDateJp(a.date)}の${rubyHtml('分', 'ぶん')}</span>` : '';
-    return `<li class="item-row ${meta.cls}" ${clickable ? `data-action="openItemSheet" data-assignment="${a.id}"` : `data-action="alreadyDone"`}>
+    const action = clickable ? `data-action="openItemSheet" data-assignment="${a.id}"`
+      : eff === STATUS.SUBMITTED ? `data-action="openCorrectSheet" data-assignment="${a.id}"`
+      : `data-action="alreadyDone"`;
+    return `<li class="item-row ${meta.cls}" ${action}>
       <span class="item-icon">${meta.icon}</span>
       <span class="item-name">${itemNameHtml(a)}${dateNote}</span>
       <span class="item-status">${childLabel(eff)}</span>
@@ -364,9 +423,9 @@ async function renderChildPage() {
     ? `<button class="mini-btn primary" data-action="markAllSubmitted" style="margin-bottom:10px;">${rubyHtml('全部', 'ぜんぶ')}${rubyHtml('出', 'だ')}せた</button>`
     : '';
 
-  const redoHtml = redoRows.length ? redoRows.map(({ a, st }) => {
-    const waiting = st.status === STATUS.RESUBMIT_WAIT;
-    return `<li class="item-row ${waiting ? 'st-wait' : 'st-redo'}" data-action="${waiting ? 'redoInfo' : 'openRedoSheet'}" data-assignment="${a.id}">
+  const redoHtml = redoRows.length ? redoRows.map(({ a, st, eff }) => {
+    const waiting = eff === STATUS.RESUBMIT_WAIT;
+    return `<li class="item-row ${waiting ? 'st-wait' : 'st-redo'}" data-action="${waiting ? 'openWaitSheet' : 'openRedoSheet'}" data-assignment="${a.id}">
       <span class="item-icon">${waiting ? '→' : '★'}</span>
       <span class="item-name">${itemNameHtml(a)}${st.comment ? `<span class="item-comment">${rubyHtml('先生', 'せんせい')}から：${escapeHtml(st.comment)}</span>` : ''}</span>
       <span class="item-status">${waiting ? childLabel(STATUS.RESUBMIT_WAIT) : rubyHtml('直', 'なお') + 'してね'}</span>
@@ -406,10 +465,42 @@ async function renderChildPage() {
         <p>${rubyHtml('忘', 'わす')}れた　${forgottenAssignments.size}${rubyHtml('回', 'かい')}</p>
       </section>
 
+      ${state.solo ? '<button class="teacher-link" data-action="goTeacherPin">教師用</button>' : ''}
+
       <button class="finish-btn" data-action="finishChild">${rubyHtml('登録', 'とうろく')}する</button>
     </div>
   `;
   resetInactivityTimer();
+}
+
+// 「出せた」を押しまちがえたとき、自分で「まだ」にもどす。
+async function openCorrectSheet(assignmentId) {
+  const a = (await getAllAssignmentsWithItems()).find(x => x.id === assignmentId);
+  if (!a || !a.item) return;
+  renderModal(`
+    <h3>${itemNameHtml(a)}</h3>
+    <p>${rubyHtml('出', 'だ')}せた、で${rubyHtml('登録', 'とうろく')}されています。</p>
+    <div class="sheet-buttons">
+      <button class="big-btn" data-action="setChildStatus" data-status="${STATUS.NOT_SUBMITTED}" data-assignment="${assignmentId}">${rubyHtml('間違', 'まちが')}えた。まだ${rubyHtml('出', 'だ')}していない</button>
+      <button class="big-btn cancel" data-action="closeModal">${rubyHtml('このまま', '')}</button>
+    </div>
+    <p style="color:#666;font-size:0.9rem;">${rubyHtml('直', 'なお')}したあと、「${rubyHtml('登録', 'とうろく')}する」を${rubyHtml('押', 'お')}してね。</p>
+  `);
+}
+
+// 「出し直した」を押しまちがえたとき、自分で「直し」にもどす。
+async function openWaitSheet(assignmentId) {
+  const a = (await getAllAssignmentsWithItems()).find(x => x.id === assignmentId);
+  if (!a || !a.item) return;
+  renderModal(`
+    <h3>${itemNameHtml(a)}</h3>
+    <p>${rubyHtml('先生', 'せんせい')}の${rubyHtml('確認', 'かくにん')}を${rubyHtml('待', 'ま')}っています。</p>
+    <div class="sheet-buttons">
+      <button class="big-btn" data-action="setChildStatus" data-status="${STATUS.REDO}" data-assignment="${assignmentId}">${rubyHtml('間違', 'まちが')}えた。まだ${rubyHtml('直', 'なお')}している</button>
+      <button class="big-btn cancel" data-action="closeModal">${rubyHtml('このまま', '')}</button>
+    </div>
+    <p style="color:#666;font-size:0.9rem;">${rubyHtml('直', 'なお')}したあと、「${rubyHtml('登録', 'とうろく')}する」を${rubyHtml('押', 'お')}してね。</p>
+  `);
 }
 
 function renderModal(html) {
@@ -814,6 +905,12 @@ async function renderTeacherStudents() {
           <button class="mini-btn" id="scanRosterQrBtn">QRコードを読み取る</button>
         </div>
       </section>
+      <section class="card">
+        <h2>児童1人に1台のタブレットを使うとき</h2>
+        <p style="color:#666;font-size:0.9rem;">児童が自分のタブレットで、自分の提出状況を登録できます。先生の端末でクラウド同期を始めたあと、各児童のタブレットで「設定」→「この児童専用にする」から、その児童用のQRコードを読み取ります（先生の端末と自動で同期します）。児童のタブレットには、その児童本人のデータだけが入ります。</p>
+        <button class="mini-btn primary" id="showAllSetupQrBtn">全員分の設定QRを表示（印刷用）</button>
+        <p style="color:#666;font-size:0.8rem;margin:6px 0 0;">1人分だけ表示する場合は、上の名簿の「操作」から開けます。</p>
+      </section>
     </div>
   `;
   attachFuriganaAutofill(document.querySelector('#addStudentForm [name=name]'), document.querySelector('#addStudentForm [name=kana]'));
@@ -869,6 +966,7 @@ async function renderTeacherStudents() {
   document.getElementById('scanRosterQrBtn').addEventListener('click', () => {
     openRosterQrScanner();
   });
+  document.getElementById('showAllSetupQrBtn').addEventListener('click', showAllChildSetupQrs);
   document.getElementById('studentCodeCsvFile').addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -1519,6 +1617,34 @@ async function renderTimePresetCard() {
   });
 }
 
+async function renderSoloCard() {
+  const card = document.getElementById('soloCard');
+  if (!card) return;
+  const mine = state.solo ? await DB.get('students', state.studentId) : null;
+  card.innerHTML = mine ? `
+    <h2>この端末は児童専用です</h2>
+    <p>${mine.number}番 ${escapeHtml(mine.name)}さん専用になっています。起動すると、この児童の画面が開きます。</p>
+    <button class="mini-btn danger" id="releaseSoloBtn" type="button">児童専用をやめる</button>
+  ` : `
+    <h2>この端末を児童専用にする（1人1台）</h2>
+    <p style="color:#666;font-size:0.9rem;">児童のタブレットで使います。先生の端末の「名簿」にある設定用QRコードを読み取ると、クラウド同期につながり、その児童だけの画面から始まります。<strong>先生の端末では実行しないでください</strong>（この端末のデータが消えます）。</p>
+    <button class="mini-btn primary" id="scanChildSetupBtn" type="button">設定用QRコードを読み取る</button>
+  `;
+  const scanBtn = document.getElementById('scanChildSetupBtn');
+  if (scanBtn) scanBtn.addEventListener('click', () => openQrScanner(handleScannedChildSetup, '設定用QRコードを読み取る'));
+  const releaseBtn = document.getElementById('releaseSoloBtn');
+  if (releaseBtn) {
+    releaseBtn.addEventListener('click', async () => {
+      if (!confirm('児童専用をやめて、番号を選ぶ通常の画面にもどします。よろしいですか？')) return;
+      await setMeta('myStudentCode', null);
+      state.solo = false;
+      state.studentId = null;
+      showToast('児童専用をやめました');
+      renderTeacherSettings();
+    });
+  }
+}
+
 async function renderHolidayCard() {
   const card = document.getElementById('holidayCard');
   if (!card) return;
@@ -1627,6 +1753,7 @@ async function renderTeacherSettings() {
           <button type="submit" class="mini-btn primary">変更</button>
         </form>
       </section>
+      <section class="card" id="soloCard"></section>
       <section class="card" id="timePresetCard"></section>
       <section class="card" id="holidayCard"></section>
       <section class="card">
@@ -1655,6 +1782,7 @@ async function renderTeacherSettings() {
       </section>
     </div>
   `;
+  await renderSoloCard();
   await renderTimePresetCard();
   await renderHolidayCard();
   const showQrBtn = document.getElementById('showQrBtn');
@@ -1826,6 +1954,90 @@ async function showJoinQr(classroomId) {
   } catch (err) {
     document.getElementById('qrHolder').textContent = err.message;
   }
+}
+
+// ---------- 1人1台：児童のタブレットを設定するためのQRコード ----------
+
+function childSetupPayload(student, classroomId) {
+  return JSON.stringify({ t: 'stc', c: classroomId, n: student.number, nm: student.name, k: student.kana || '', cd: student.code });
+}
+
+async function showChildSetupQr(studentId) {
+  const classroomId = await Sync.getClassroomId();
+  if (!classroomId) {
+    alert('先に、設定の「クラウド同期」を始めてください。');
+    return;
+  }
+  const s = await DB.get('students', studentId);
+  renderModal(`
+    <h3>${s.number}番 ${escapeHtml(s.name)}さんのタブレット設定</h3>
+    <p style="color:#666;font-size:0.9rem;text-align:left;">児童のタブレットでこのアプリを開き、「教師用」→PIN→「設定」→「この端末を児童専用にする」から、このQRコードを読み取ってください。氏名と同期コードが含まれるので、他の人には見せないでください。</p>
+    <div id="qrHolder" style="display:flex;justify-content:center;margin:16px 0;"></div>
+    <button class="big-btn cancel" data-action="closeModal">閉じる</button>
+  `);
+  try {
+    await renderQrInto(document.getElementById('qrHolder'), childSetupPayload(s, classroomId), 'M');
+  } catch (err) {
+    document.getElementById('qrHolder').textContent = err.message;
+  }
+}
+
+async function showAllChildSetupQrs() {
+  const classroomId = await Sync.getClassroomId();
+  if (!classroomId) {
+    alert('先に、設定の「クラウド同期」を始めてください。');
+    return;
+  }
+  const students = await getActiveStudents();
+  try {
+    await loadQrLib();
+  } catch (err) {
+    alert(err.message);
+    return;
+  }
+  const wrap = document.createElement('div');
+  wrap.id = 'setupQrOverlay';
+  wrap.className = 'setup-qr-overlay';
+  wrap.innerHTML = `
+    <div class="setup-qr-bar">
+      <button class="mini-btn primary" id="setupQrPrint" type="button">印刷する</button>
+      <button class="mini-btn" id="setupQrClose" type="button">閉じる</button>
+      <p style="color:#666;font-size:0.85rem;margin:8px 0 0;">各児童のタブレットで、教師用の「設定」→「この端末を児童専用にする」から読み取ります。氏名と同期コードが含まれるので、印刷したものは大切に保管し、設定が終わったら処分してください。</p>
+    </div>
+    <div class="setup-qr-grid">
+      ${students.map(s => `<div class="setup-qr-card"><canvas data-student="${s.id}"></canvas><div class="sq-name">${s.number}番 ${escapeHtml(s.name)}</div></div>`).join('')}
+    </div>`;
+  document.body.appendChild(wrap);
+  document.getElementById('setupQrClose').addEventListener('click', () => wrap.remove());
+  document.getElementById('setupQrPrint').addEventListener('click', () => window.print());
+  for (const s of students) {
+    const canvas = wrap.querySelector(`canvas[data-student="${s.id}"]`);
+    await new Promise((resolve) => {
+      window.QRCode.toCanvas(canvas, childSetupPayload(s, classroomId), { width: 150, margin: 1, errorCorrectionLevel: 'M' }, () => resolve());
+    });
+  }
+}
+
+async function handleScannedChildSetup(text) {
+  let p = null;
+  try { p = JSON.parse(text); } catch (e) { /* 下で判定 */ }
+  if (!p || p.t !== 'stc' || !p.c || !p.cd || !p.nm || !Number.isFinite(Number(p.n))) {
+    alert('これは、児童のタブレット設定用のQRコードではありません。');
+    return;
+  }
+  const students = await DB.getAll('students');
+  const hasOtherData = students.some(s => s.code !== p.cd) || (await DB.getAll('assignments')).length > 0;
+  if (hasOtherData && !confirm(`この端末にある名簿・提出物・提出記録をすべて消して、「${p.n}番 ${p.nm}さん」専用にします。先生の端末で行うと、データが消えてしまいます。よろしいですか？`)) return;
+  if (await Sync.isSyncEnabled()) await Sync.leaveClassroom();
+  for (const store of ['students', 'items', 'assignments', 'statuses', 'history']) await DB.clear(store);
+  const id = await DB.add('students', { number: Number(p.n), name: p.nm, kana: p.k || '', code: p.cd, active: true });
+  await Sync.joinClassroom(p.c);
+  await setMeta('myStudentCode', p.cd);
+  state.solo = true;
+  state.studentId = id;
+  state.pending = new Map();
+  showToast('設定できました');
+  goto('childPage');
 }
 
 let jsQrLibPromise = null;
@@ -2189,6 +2401,7 @@ async function openStudentActions(studentId) {
     <div class="sheet-buttons">
       <button class="big-btn" data-action="openEditStudentSheet" data-id="${s.id}">編集する</button>
       <button class="big-btn" data-action="openStudentDetail" data-id="${s.id}">詳細を見る</button>
+      <button class="big-btn" data-action="showChildSetupQr" data-id="${s.id}">この児童のタブレット設定QR</button>
       <button class="big-btn" data-action="toggleStudentActive" data-id="${s.id}">${s.active === false ? '復帰させる' : '停止する'}</button>
       <button class="big-btn cancel" data-action="deleteStudent" data-id="${s.id}" data-name="${escapeHtml(s.name)}">削除する</button>
       <button class="big-btn cancel" data-action="closeModal">閉じる</button>
@@ -2280,32 +2493,34 @@ async function handleAction(action, ds) {
       const { todayRows } = await getChildRows(state.studentId);
       const untouched = todayRows.filter(({ eff }) => eff === STATUS.NOT_SUBMITTED).map(({ a }) => a);
       if (state.pending.size === 0 && untouched.length === 0) {
-        goto('childSelect');
+        if (state.solo) showToast('もう全部登録できているよ');
+        else goto('childSelect');
         return;
       }
       openConfirmSheet(untouched);
       return;
     }
-    case 'confirmRegister': {
-      const studentId = state.studentId;
-      const { todayRows: beforeRows } = await getChildRows(studentId);
-      const assignmentIds = beforeRows.map(({ a }) => a.id);
-      await commitPending();
-      closeModal();
-      let allDone = assignmentIds.length > 0;
-      for (const id of assignmentIds) {
-        const st = await getStatus(studentId, id);
-        if (st.status !== STATUS.SUBMITTED && st.status !== STATUS.EXEMPT) { allDone = false; break; }
+    case 'confirmRegister':
+      await registerAndFinish();
+      return;
+    case 'confirmAllSubmitted': {
+      state.studentId = state.pendingStudentId;
+      state.pending = new Map();
+      const { todayRows } = await getChildRows(state.studentId);
+      for (const { a, eff } of todayRows) {
+        if (eff === STATUS.NOT_SUBMITTED) state.pending.set(a.id, { status: STATUS.SUBMITTED, plannedDate: null });
       }
-      if (allDone) showCelebration(); else showToast('登録したよ！');
-      goto('childSelect');
+      await registerAndFinish();
       return;
     }
     case 'alreadyDone':
-      showToast('もう出したよ！取り消しは先生に言ってね');
+      showToast('先生が決めたものだよ');
       return;
-    case 'redoInfo':
-      showToast('先生の確認を待っているよ');
+    case 'openCorrectSheet':
+      await openCorrectSheet(Number(ds.assignment));
+      return;
+    case 'openWaitSheet':
+      await openWaitSheet(Number(ds.assignment));
       return;
     case 'openItemSheet':
       openItemSheet(Number(ds.assignment));
@@ -2380,7 +2595,8 @@ async function handleAction(action, ds) {
       goto('teacherPin');
       return;
     case 'goChildSelect':
-      goto('childSelect');
+      state.pending = new Map();
+      goto(state.solo ? 'childPage' : 'childSelect');
       return;
     case 'pinDigit':
       if (!state.pinInput) state.pinInput = '';
@@ -2474,6 +2690,9 @@ async function handleAction(action, ds) {
       return;
     case 'openStudentActions':
       openStudentActions(Number(ds.id));
+      return;
+    case 'showChildSetupQr':
+      await showChildSetupQr(Number(ds.id));
       return;
     case 'openEditStudentSheet': {
       const s = await DB.get('students', Number(ds.id));
@@ -2648,6 +2867,17 @@ async function main() {
     }
     Sync.onSyncChange(() => render());
     if (await Sync.isSyncEnabled()) Sync.startSync();
+
+    // 1人1台モード：この端末が特定の児童専用なら、その児童の画面から始める。
+    const myCode = await getMeta('myStudentCode', null);
+    if (myCode) {
+      const mine = (await DB.getAllByIndex('students', 'code', myCode))[0];
+      if (mine) {
+        state.solo = true;
+        state.studentId = mine.id;
+        state.screen = 'childPage';
+      }
+    }
 
     const joinParam = new URLSearchParams(location.search).get('join');
     if (joinParam && !(await Sync.isSyncEnabled())) {
