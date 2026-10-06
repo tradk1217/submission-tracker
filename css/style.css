@@ -451,9 +451,9 @@ html, body {
 
 .sync-note { text-align: center; color: var(--muted); font-size: 0.85rem; margin: 8px 0 0; }
 .setup-qr-overlay { position: fixed; inset: 0; background: white; z-index: 300; overflow: auto; padding: 16px; }
-.setup-qr-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 12px; margin-top: 12px; }
+.setup-qr-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 12px; margin-top: 12px; }
 .setup-qr-card { border: 1px dashed #999; padding: 8px; text-align: center; break-inside: avoid; }
-.setup-qr-card canvas { width: 150px; height: 150px; }
+.setup-qr-card canvas { width: 190px; height: 190px; }
 .setup-qr-card .sq-name { font-size: 0.95rem; font-weight: bold; margin-top: 4px; }
 @media print {
   body > *:not(#setupQrOverlay) { display: none !important; }
