@@ -73,7 +73,12 @@ export async function startNewClassroom() {
   await setMeta('classroomId', id);
   await startSync();
   // 同期を始める前に登録していた提出物などを、はじめにクラウドへ送っておく。
-  try { await pushAll(); } catch (err) { console.error('initial push failed', err); }
+  try {
+    await pushAll();
+    await setMeta('lastPushAll', { classroomId: id, at: Date.now() });
+  } catch (err) {
+    console.error('initial push failed', err);
+  }
   return id;
 }
 
@@ -153,6 +158,17 @@ async function reconcilePending() {
         s.assignmentId = localAssignmentId;
         s.key = `${s.studentId}_${localAssignmentId}`;
         await DB.put('statuses', s);
+      }
+    }
+  }
+  const history = await DB.getAll('history');
+  for (const h of history) {
+    if (h._pendingAssignmentSyncId) {
+      const localAssignmentId = await localAssignmentIdBySyncId(h._pendingAssignmentSyncId);
+      if (localAssignmentId) {
+        delete h._pendingAssignmentSyncId;
+        h.assignmentId = localAssignmentId;
+        await DB.put('history', h);
       }
     }
   }
@@ -253,6 +269,8 @@ export async function startSync() {
       const row = {
         studentId: localStudentId, assignmentId: localAssignmentId,
         status: data.status, actor: data.actor, at: data.at, fsId: change.doc.id,
+        // 登録（assignments）の受信より先に届いたときは、あとで紐付ける。
+        ...(localAssignmentId ? {} : { _pendingAssignmentSyncId: data.assignmentSyncId }),
       };
       if (existing.length) await DB.put('history', { ...existing[0], ...row });
       else await DB.add('history', row);
@@ -291,13 +309,14 @@ export async function pushAll() {
     existing[name] = new Set(snap.docs.map(d => d.id));
   }
   const ops = [];
-  const queue = (name, id, data) => {
-    if (!existing[name].has(id)) ops.push({ ref: doc(dbFs, 'classes', classroomId, name, id), data: JSON.parse(JSON.stringify(data)), name });
+  const queue = (name, id, data, force) => {
+    if (force || !existing[name].has(id)) ops.push({ ref: doc(dbFs, 'classes', classroomId, name, id), data: JSON.parse(JSON.stringify(data)), name });
   };
 
   const items = await DB.getAll('items');
+  const newlyIdentifiedItems = new Set();
   for (const it of items) {
-    if (!it.syncId) { it.syncId = uid(); await DB.put('items', it); }
+    if (!it.syncId) { it.syncId = uid(); await DB.put('items', it); newlyIdentifiedItems.add(it.id); }
     const { id, syncId, ...rest } = it;
     queue('items', syncId, rest);
   }
@@ -308,7 +327,8 @@ export async function pushAll() {
     if (!a.syncId) { a.syncId = uid(); await DB.put('assignments', a); }
     const itemSyncId = itemSync.get(a.itemId);
     if (!itemSyncId) continue;
-    queue('assignments', a.syncId, { date: a.date, deadline: a.deadline || null, detail: a.detail || '', itemSyncId });
+    // 以前の提出物（まだ共通の識別子が無かったもの）に紐づく登録は、クラウド側の紐づけが空のため、上書きして直す。
+    queue('assignments', a.syncId, { date: a.date, deadline: a.deadline || null, detail: a.detail || '', itemSyncId }, newlyIdentifiedItems.has(a.itemId));
   }
   const assignmentSync = new Map(assignments.map(a => [a.id, a.syncId]));
 
@@ -338,6 +358,23 @@ export async function pushAll() {
   }
   const count = (name) => ops.filter(o => o.name === name).length;
   return { items: count('items'), assignments: count('assignments'), statuses: count('statuses'), history: count('history'), total: ops.length };
+}
+
+// 先生の端末が起動したときに、自動で pushAll を行う（手でボタンを押さなくてよいように）。
+// 読み出しの回数を抑えるため、同じ学級では12時間に1回までにする。
+export async function autoPush() {
+  const classroomId = await getClassroomId();
+  if (!classroomId) return null;
+  const last = await getMeta('lastPushAll', null);
+  if (last && last.classroomId === classroomId && Date.now() - last.at < 12 * 3600 * 1000) return null;
+  try {
+    const result = await pushAll();
+    await setMeta('lastPushAll', { classroomId, at: Date.now() });
+    return result;
+  } catch (err) {
+    console.error('auto push failed', err);
+    return null;
+  }
 }
 
 export function pushItem(localItem) {

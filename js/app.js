@@ -911,7 +911,7 @@ async function renderTeacherStudents() {
       </section>
       <section class="card">
         <h2>児童1人に1台のタブレットを使うとき</h2>
-        <p style="color:#666;font-size:0.9rem;">児童が自分のタブレットで、自分の提出状況を登録できます。先生の端末でクラウド同期を始めたあと、各児童のタブレットで「設定」→「この児童専用にする」から、その児童用のQRコードを読み取ります（先生の端末と自動で同期します）。児童のタブレットには、その児童本人のデータだけが入ります。</p>
+        <p style="color:#666;font-size:0.9rem;">児童が自分のタブレットで、自分の提出状況を登録できます。先生の端末でクラウド同期を始めたあと、下のQRコードを各児童のタブレットの標準のカメラで読み取るだけで、そのタブレットがその児童専用になり、先生の端末と自動で同期します（一度設定すれば、ずっとその児童専用です）。児童のタブレットには、その児童本人のデータだけが入ります。</p>
         <button class="mini-btn primary" id="showAllSetupQrBtn">全員分の設定QRを表示（印刷用）</button>
         <p style="color:#666;font-size:0.8rem;margin:6px 0 0;">1人分だけ表示する場合は、上の名簿の「操作」から開けます。</p>
       </section>
@@ -1631,7 +1631,7 @@ async function renderSoloCard() {
     <button class="mini-btn danger" id="releaseSoloBtn" type="button">児童専用をやめる</button>
   ` : `
     <h2>この端末を児童専用にする（1人1台）</h2>
-    <p style="color:#666;font-size:0.9rem;">児童のタブレットで使います。先生の端末の「名簿」にある設定用QRコードを読み取ると、クラウド同期につながり、その児童だけの画面から始まります。<strong>先生の端末では実行しないでください</strong>（この端末のデータが消えます）。</p>
+    <p style="color:#666;font-size:0.9rem;">児童のタブレットで使います。先生の端末の「名簿」にある設定用QRコードを、標準のカメラで読み取るか、下のボタンでこのアプリから読み取ると、クラウド同期につながり、その児童だけの画面から始まります。<strong>先生の端末では実行しないでください</strong>（この端末のデータが消えます）。</p>
     <button class="mini-btn primary" id="scanChildSetupBtn" type="button">設定用QRコードを読み取る</button>
   `;
   const scanBtn = document.getElementById('scanChildSetupBtn');
@@ -1640,6 +1640,7 @@ async function renderSoloCard() {
   if (releaseBtn) {
     releaseBtn.addEventListener('click', async () => {
       if (!confirm('児童専用をやめて、番号を選ぶ通常の画面にもどします。よろしいですか？')) return;
+      await setMeta('releasedCode', await getMeta('myStudentCode', null));
       await setMeta('myStudentCode', null);
       state.solo = false;
       state.studentId = null;
@@ -1742,7 +1743,7 @@ async function renderTeacherSettings() {
           <button class="mini-btn danger" id="leaveSyncBtn">同期をやめる</button>
           <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border);">
             <button class="mini-btn primary" id="pushAllBtn" type="button">この端末の提出物・登録をクラウドに送る</button>
-            <p style="color:#666;font-size:0.85rem;margin:6px 0 0;">児童のタブレットに先生が登録した提出物が表示されないときは、先生の端末でこれを押してください。同期を始める前に登録したものも、これで他の端末に届きます（クラウドにすでにあるものは上書きしません）。</p>
+            <p style="color:#666;font-size:0.85rem;margin:6px 0 0;">提出物や登録は、先生の端末でアプリを開いたときに自動でクラウドに送られ（同期を始める前に登録した分も含みます）、児童のタブレットに届きます。すぐに送りたいときや、うまく届かないときだけ、このボタンを押してください（クラウドにすでにあるものは上書きしません）。</p>
           </div>
         ` : `
           <p>まだ同期は設定されていません。</p>
@@ -1822,6 +1823,7 @@ async function renderTeacherSettings() {
       const code = document.getElementById('joinCodeInput').value.trim();
       if (!code) return;
       await Sync.joinClassroom(code);
+      Sync.autoPush();
       showToast('参加しました');
       renderTeacherSettings();
     });
@@ -1837,6 +1839,7 @@ async function renderTeacherSettings() {
       showToast('クラウドに送っています…');
       try {
         const r = await Sync.pushAll();
+        await setMeta('lastPushAll', { classroomId: await Sync.getClassroomId(), at: Date.now() });
         alert(r.total
           ? `クラウドに送りました。\n提出物 ${r.items}件／登録 ${r.assignments}件／提出状況 ${r.statuses}件／履歴 ${r.history}件`
           : 'クラウドにすでに全部あります。送るものはありませんでした。');
@@ -1982,8 +1985,39 @@ async function showJoinQr(classroomId) {
 
 // ---------- 1人1台：児童のタブレットを設定するためのQRコード ----------
 
+function toBase64Url(str) {
+  let bin = '';
+  new TextEncoder().encode(str).forEach(b => { bin += String.fromCharCode(b); });
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function fromBase64Url(s) {
+  const bin = atob(s.replace(/-/g, '+').replace(/_/g, '/'));
+  return new TextDecoder().decode(Uint8Array.from(bin, c => c.charCodeAt(0)));
+}
+
+// 児童用QRコードは、アプリのURLに設定情報を付けたもの。
+// カメラで読み取るとアプリが開き、その端末がその児童専用になる。
 function childSetupPayload(student, classroomId) {
-  return JSON.stringify({ t: 'stc', c: classroomId, n: student.number, nm: student.name, k: student.kana || '', cd: student.code });
+  const json = JSON.stringify({ t: 'stc', c: classroomId, n: student.number, nm: student.name, k: student.kana || '', cd: student.code });
+  return `${location.origin}${location.pathname}?setup=${toBase64Url(json)}`;
+}
+
+// URL形式でも、以前の形式（JSONそのまま）でも読めるようにしている。
+function parseChildSetup(text) {
+  try {
+    let raw = String(text).trim();
+    if (/^https?:\/\//i.test(raw)) {
+      const v = new URL(raw).searchParams.get('setup');
+      if (!v) return null;
+      raw = fromBase64Url(v);
+    }
+    const p = JSON.parse(raw);
+    if (!p || p.t !== 'stc' || !p.c || !p.cd || !p.nm || !Number.isFinite(Number(p.n))) return null;
+    return p;
+  } catch (e) {
+    return null;
+  }
 }
 
 async function showChildSetupQr(studentId) {
@@ -1995,7 +2029,7 @@ async function showChildSetupQr(studentId) {
   const s = await DB.get('students', studentId);
   renderModal(`
     <h3>${s.number}番 ${escapeHtml(s.name)}さんのタブレット設定</h3>
-    <p style="color:#666;font-size:0.9rem;text-align:left;">児童のタブレットでこのアプリを開き、「教師用」→PIN→「設定」→「この端末を児童専用にする」から、このQRコードを読み取ってください。氏名と同期コードが含まれるので、他の人には見せないでください。</p>
+    <p style="color:#666;font-size:0.9rem;text-align:left;">児童のタブレットの標準のカメラで、このQRコードを読み取ってください。アプリが開き、そのタブレットがこの児童専用になります（このあと「ホーム画面に追加」しておくと、アイコンからいつでも開けます）。氏名と同期コードが含まれるので、他の人には見せないでください。</p>
     <div id="qrHolder" style="display:flex;justify-content:center;margin:16px 0;"></div>
     <button class="big-btn cancel" data-action="closeModal">閉じる</button>
   `);
@@ -2026,7 +2060,7 @@ async function showAllChildSetupQrs() {
     <div class="setup-qr-bar">
       <button class="mini-btn primary" id="setupQrPrint" type="button">印刷する</button>
       <button class="mini-btn" id="setupQrClose" type="button">閉じる</button>
-      <p style="color:#666;font-size:0.85rem;margin:8px 0 0;">各児童のタブレットで、教師用の「設定」→「この端末を児童専用にする」から読み取ります。氏名と同期コードが含まれるので、印刷したものは大切に保管し、設定が終わったら処分してください。</p>
+      <p style="color:#666;font-size:0.85rem;margin:8px 0 0;">各児童のタブレットの標準のカメラで読み取ると、アプリが開いて、そのタブレットがその児童専用になります。氏名と同期コードが含まれるので、印刷したものは大切に保管し、設定が終わったら処分してください。</p>
     </div>
     <div class="setup-qr-grid">
       ${students.map(s => `<div class="setup-qr-card"><canvas data-student="${s.id}"></canvas><div class="sq-name">${s.number}番 ${escapeHtml(s.name)}</div></div>`).join('')}
@@ -2037,30 +2071,49 @@ async function showAllChildSetupQrs() {
   for (const s of students) {
     const canvas = wrap.querySelector(`canvas[data-student="${s.id}"]`);
     await new Promise((resolve) => {
-      window.QRCode.toCanvas(canvas, childSetupPayload(s, classroomId), { width: 150, margin: 1, errorCorrectionLevel: 'M' }, () => resolve());
+      window.QRCode.toCanvas(canvas, childSetupPayload(s, classroomId), { width: 190, margin: 1, errorCorrectionLevel: 'M' }, () => resolve());
     });
   }
 }
 
-async function handleScannedChildSetup(text) {
-  let p = null;
-  try { p = JSON.parse(text); } catch (e) { /* 下で判定 */ }
-  if (!p || p.t !== 'stc' || !p.c || !p.cd || !p.nm || !Number.isFinite(Number(p.n))) {
-    alert('これは、児童のタブレット設定用のQRコードではありません。');
-    return;
+// この端末を、pの児童専用にする。結果：'done'（設定した）／'same'（すでに同じ児童専用）／'released'（専用をやめた直後の自動設定を見送った）／'cancelled'
+async function applyChildSetup(p, auto) {
+  const myCode = await getMeta('myStudentCode', null);
+  if (myCode === p.cd) {
+    const mine = (await DB.getAllByIndex('students', 'code', p.cd))[0];
+    if (mine) {
+      state.solo = true;
+      state.studentId = mine.id;
+      return 'same';
+    }
   }
+  // 「児童専用をやめた」端末で、保存済みのURL（ホーム画面のアイコンなど）から勝手に設定し直さないようにする。
+  if (auto && await getMeta('releasedCode', null) === p.cd) return 'released';
+
   const students = await DB.getAll('students');
   const hasOtherData = students.some(s => s.code !== p.cd) || (await DB.getAll('assignments')).length > 0;
-  if (hasOtherData && !confirm(`この端末にある名簿・提出物・提出記録をすべて消して、「${p.n}番 ${p.nm}さん」専用にします。先生の端末で行うと、データが消えてしまいます。よろしいですか？`)) return;
+  if (hasOtherData && !confirm(`この端末にある名簿・提出物・提出記録をすべて消して、「${p.n}番 ${p.nm}さん」専用にします。先生の端末で行うと、データが消えてしまいます。よろしいですか？`)) return 'cancelled';
   if (await Sync.isSyncEnabled()) await Sync.leaveClassroom();
   for (const store of ['students', 'items', 'assignments', 'statuses', 'history']) await DB.clear(store);
   const id = await DB.add('students', { number: Number(p.n), name: p.nm, kana: p.k || '', code: p.cd, active: true });
   await Sync.joinClassroom(p.c);
   await setMeta('myStudentCode', p.cd);
+  await setMeta('releasedCode', null);
   state.solo = true;
   state.studentId = id;
   state.pending = new Map();
-  showToast('設定できました');
+  return 'done';
+}
+
+async function handleScannedChildSetup(text) {
+  const p = parseChildSetup(text);
+  if (!p) {
+    alert('これは、児童のタブレット設定用のQRコードではありません。');
+    return;
+  }
+  const result = await applyChildSetup(p, false);
+  if (result === 'cancelled') return;
+  showToast(result === 'same' ? 'すでに、この児童専用になっています' : '設定できました');
   goto('childPage');
 }
 
@@ -2900,6 +2953,22 @@ async function main() {
         state.solo = true;
         state.studentId = mine.id;
         state.screen = 'childPage';
+      }
+    }
+
+    // 先生の端末では、起動したときに、まだクラウドに無い提出物や登録を自動で送っておく（児童の端末に届くように）。
+    if (!state.solo) Sync.autoPush();
+
+    // 児童用QRコード（URL）から開かれたときは、自動でその児童専用にする。
+    // URLは消さずに残しておく（ホーム画面に追加したときも、同じ設定が引き継がれるように）。
+    if (new URLSearchParams(location.search).get('setup')) {
+      const p = parseChildSetup(location.href);
+      if (!p) {
+        alert('児童用QRコードのURLが正しくありません。先生に、QRコードをもう一度出してもらってください。');
+      } else {
+        const result = await applyChildSetup(p, true);
+        if (result === 'done') showToast('この端末を、' + p.nm + 'さん専用にしました');
+        if (result === 'done' || result === 'same') state.screen = 'childPage';
       }
     }
 
