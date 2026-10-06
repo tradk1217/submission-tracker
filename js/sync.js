@@ -6,6 +6,7 @@
 // 端末をまたいで同じ人・同じ課題だと分かるように、児童は"code"、
 // 提出物・提出対象は"syncId"という共有の乱数キーで突き合わせる。
 import { DB, getMeta, setMeta } from './db.js';
+import { uid } from './util.js';
 
 const FS_SDK = 'https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js';
 const APP_SDK = 'https://www.gstatic.com/firebasejs/10.13.2/firebase-app.js';
@@ -71,6 +72,8 @@ export async function startNewClassroom() {
   const id = generateClassroomId();
   await setMeta('classroomId', id);
   await startSync();
+  // 同期を始める前に登録していた提出物などを、はじめにクラウドへ送っておく。
+  try { await pushAll(); } catch (err) { console.error('initial push failed', err); }
   return id;
 }
 
@@ -272,6 +275,69 @@ async function withFs(fn) {
   } catch (err) {
     console.error('sync push failed', err);
   }
+}
+
+// この端末にある提出物・登録・提出状況・履歴のうち、クラウドにまだ無いものを送る。
+// 同期を始める前に作ったデータや、同期が途切れていた間の変更を、他の端末（児童のタブレット）に渡すために使う。
+// クラウドに既にあるものは上書きしないので、何度押しても安全。
+export async function pushAll() {
+  const classroomId = await getClassroomId();
+  if (!classroomId) throw new Error('クラウド同期が始まっていません');
+  await ensureFirebase();
+  const { doc, collection, getDocs, writeBatch } = fsApi;
+  const existing = {};
+  for (const name of ['items', 'assignments', 'statuses', 'history']) {
+    const snap = await getDocs(collection(dbFs, 'classes', classroomId, name));
+    existing[name] = new Set(snap.docs.map(d => d.id));
+  }
+  const ops = [];
+  const queue = (name, id, data) => {
+    if (!existing[name].has(id)) ops.push({ ref: doc(dbFs, 'classes', classroomId, name, id), data: JSON.parse(JSON.stringify(data)), name });
+  };
+
+  const items = await DB.getAll('items');
+  for (const it of items) {
+    if (!it.syncId) { it.syncId = uid(); await DB.put('items', it); }
+    const { id, syncId, ...rest } = it;
+    queue('items', syncId, rest);
+  }
+  const itemSync = new Map(items.map(i => [i.id, i.syncId]));
+
+  const assignments = await DB.getAll('assignments');
+  for (const a of assignments) {
+    if (!a.syncId) { a.syncId = uid(); await DB.put('assignments', a); }
+    const itemSyncId = itemSync.get(a.itemId);
+    if (!itemSyncId) continue;
+    queue('assignments', a.syncId, { date: a.date, deadline: a.deadline || null, detail: a.detail || '', itemSyncId });
+  }
+  const assignmentSync = new Map(assignments.map(a => [a.id, a.syncId]));
+
+  const codeById = new Map((await DB.getAll('students')).map(s => [s.id, s.code]));
+  for (const st of await DB.getAll('statuses')) {
+    const code = codeById.get(st.studentId);
+    const asg = assignmentSync.get(st.assignmentId);
+    if (!code || !asg) continue;
+    queue('statuses', `${code}_${asg}`, {
+      studentCode: code, assignmentSyncId: asg, status: st.status,
+      plannedDate: st.plannedDate ?? null, updatedAt: st.updatedAt ?? null, updatedBy: st.updatedBy ?? null,
+      ...(st.comment ? { comment: st.comment } : {}),
+    });
+  }
+  for (const h of await DB.getAll('history')) {
+    const code = codeById.get(h.studentId);
+    const asg = assignmentSync.get(h.assignmentId);
+    if (!code || !asg) continue;
+    if (!h.fsId) { h.fsId = uid(); await DB.put('history', h); }
+    queue('history', h.fsId, { studentCode: code, assignmentSyncId: asg, status: h.status, actor: h.actor, at: h.at });
+  }
+
+  for (let i = 0; i < ops.length; i += 400) {
+    const batch = writeBatch(dbFs);
+    for (const op of ops.slice(i, i + 400)) batch.set(op.ref, op.data);
+    await batch.commit();
+  }
+  const count = (name) => ops.filter(o => o.name === name).length;
+  return { items: count('items'), assignments: count('assignments'), statuses: count('statuses'), history: count('history'), total: ops.length };
 }
 
 export function pushItem(localItem) {

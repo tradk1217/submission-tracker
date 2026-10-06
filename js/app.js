@@ -465,7 +465,11 @@ async function renderChildPage() {
         <p>${rubyHtml('忘', 'わす')}れた　${forgottenAssignments.size}${rubyHtml('回', 'かい')}</p>
       </section>
 
-      ${state.solo ? '<button class="teacher-link" data-action="goTeacherPin">教師用</button>' : ''}
+      ${state.solo ? (() => {
+        const ss = Sync.getSyncState();
+        const note = ss.connected ? 'つながっています' : (ss.error ? `つながっていません（${escapeHtml(ss.error)}）` : 'つなげています…');
+        return `<p class="sync-note">${rubyHtml('先生', 'せんせい')}との${rubyHtml('同期', 'どうき')}：${note}</p><button class="teacher-link" data-action="goTeacherPin">教師用</button>`;
+      })() : ''}
 
       <button class="finish-btn" data-action="finishChild">${rubyHtml('登録', 'とうろく')}する</button>
     </div>
@@ -1736,6 +1740,10 @@ async function renderTeacherSettings() {
           <p style="color:#666;font-size:0.85rem;">他の端末では、名簿画面で先に「名簿（コード付き）」を取り込んでから、この同期コードを入力するか、QRコードを読み取って参加してください。</p>
           <button class="mini-btn" id="showQrBtn">QRコードを表示</button>
           <button class="mini-btn danger" id="leaveSyncBtn">同期をやめる</button>
+          <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border);">
+            <button class="mini-btn primary" id="pushAllBtn" type="button">この端末の提出物・登録をクラウドに送る</button>
+            <p style="color:#666;font-size:0.85rem;margin:6px 0 0;">児童のタブレットに先生が登録した提出物が表示されないときは、先生の端末でこれを押してください。同期を始める前に登録したものも、これで他の端末に届きます（クラウドにすでにあるものは上書きしません）。</p>
+          </div>
         ` : `
           <p>まだ同期は設定されていません。</p>
           <button class="mini-btn primary" id="startSyncBtn">この端末を最初の端末にして同期を始める</button>
@@ -1821,6 +1829,22 @@ async function renderTeacherSettings() {
   const scanSyncQrBtn = document.getElementById('scanSyncQrBtn');
   if (scanSyncQrBtn) {
     scanSyncQrBtn.addEventListener('click', () => openQrScanner(handleScannedJoinCode));
+  }
+  const pushAllBtn = document.getElementById('pushAllBtn');
+  if (pushAllBtn) {
+    pushAllBtn.addEventListener('click', async () => {
+      pushAllBtn.disabled = true;
+      showToast('クラウドに送っています…');
+      try {
+        const r = await Sync.pushAll();
+        alert(r.total
+          ? `クラウドに送りました。\n提出物 ${r.items}件／登録 ${r.assignments}件／提出状況 ${r.statuses}件／履歴 ${r.history}件`
+          : 'クラウドにすでに全部あります。送るものはありませんでした。');
+      } catch (err) {
+        alert('送れませんでした: ' + (err && err.message ? err.message : String(err)));
+      }
+      pushAllBtn.disabled = false;
+    });
   }
   const leaveSyncBtn = document.getElementById('leaveSyncBtn');
   if (leaveSyncBtn) {
