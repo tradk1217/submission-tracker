@@ -449,6 +449,7 @@ html, body {
 .item-comment { display: block; margin-top: 4px; font-size: 0.9rem; color: #7a5b00; font-weight: normal; }
 .quick-comment { color: #7a5b00; background: #fff6e0; border-radius: 6px; padding: 4px 8px; margin: 4px 0 6px; font-size: 0.85rem; white-space: pre-wrap; }
 
+.sync-note { text-align: center; color: var(--muted); font-size: 0.85rem; margin: 8px 0 0; }
 .setup-qr-overlay { position: fixed; inset: 0; background: white; z-index: 300; overflow: auto; padding: 16px; }
 .setup-qr-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 12px; margin-top: 12px; }
 .setup-qr-card { border: 1px dashed #999; padding: 8px; text-align: center; break-inside: avoid; }
