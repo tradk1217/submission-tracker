@@ -33,24 +33,36 @@ function notify() {
 
 let signedIn = false;
 
-async function ensureFirebase() {
-  if (!fsApi) {
-    const { firebaseConfig } = await import('./firebase-config.js');
-    const [{ initializeApp }, fsMod, authMod] = await Promise.all([
-      import(APP_SDK), import(FS_SDK), import(AUTH_SDK),
-    ]);
-    const app = initializeApp(firebaseConfig);
-    dbFs = fsMod.initializeFirestore(app, {
-      localCache: fsMod.persistentLocalCache({ tabManager: fsMod.persistentSingleTabManager() }),
+// 起動直後は、同期の開始・自動送信・保存時の送信が同時に呼ばれる。
+// 初期化を2回走らせると失敗するので、1つの処理にまとめて、全員がそれを待つようにしている。
+let firebasePromise = null;
+
+function ensureFirebase() {
+  if (!firebasePromise) {
+    firebasePromise = (async () => {
+      if (!fsApi) {
+        const { firebaseConfig } = await import('./firebase-config.js');
+        const [{ initializeApp }, fsMod, authMod] = await Promise.all([
+          import(APP_SDK), import(FS_SDK), import(AUTH_SDK),
+        ]);
+        const app = initializeApp(firebaseConfig);
+        dbFs = fsMod.initializeFirestore(app, {
+          localCache: fsMod.persistentLocalCache({ tabManager: fsMod.persistentSingleTabManager() }),
+        });
+        fsApi = fsMod;
+        authObj = authMod.getAuth(app);
+      }
+      if (!signedIn) {
+        const { signInAnonymously } = await import(AUTH_SDK);
+        await signInAnonymously(authObj);
+        signedIn = true;
+      }
+    })().catch((err) => {
+      firebasePromise = null;
+      throw err;
     });
-    fsApi = fsMod;
-    authObj = authMod.getAuth(app);
   }
-  if (!signedIn) {
-    const { signInAnonymously } = await import(AUTH_SDK);
-    await signInAnonymously(authObj);
-    signedIn = true;
-  }
+  return firebasePromise;
 }
 
 export async function getClassroomId() {
