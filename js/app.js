@@ -316,7 +316,9 @@ async function renderChildSelect() {
     <div class="screen child-select">
       <h1 class="page-title">${rubyHtml('出席番号', 'しゅっせきばんごう')}を ${rubyHtml('押', 'お')}してね</h1>
       ${progress}
-      <div class="num-grid">${panels || '<p class="empty">児童が登録されていません</p>'}</div>
+      <div class="num-grid">${panels || `<div class="empty" style="grid-column:1 / -1;"><p>児童が登録されていません。</p>
+        <p style="font-size:0.9rem;">児童のタブレットの場合は、先生にもらった児童用のQRコードを、下のボタンで読み取ってください。</p>
+        <button class="big-btn" data-action="scanChildSetup" type="button" style="margin-top:8px;">${rubyHtml('QRコード', '')}を${rubyHtml('読', 'よ')}み${rubyHtml('取', 'と')}る</button></div>`}</div>
       <button class="teacher-link" data-action="goTeacherPin">教師用</button>
     </div>
   `;
@@ -397,6 +399,9 @@ async function renderChildPage() {
   if (!student) { goto('childSelect'); return; }
 
   const { todayRows, doneRows, redoRows, laterRows } = await getChildRows(student.id);
+  const everyAssignment = await DB.getAll('assignments');
+  const allAssignmentCount = everyAssignment.length;
+  const todayAssignmentCount = everyAssignment.filter(a => a.date === todayStr()).length;
   const shownRows = [...todayRows, ...doneRows].sort((x, y) => x.a.date.localeCompare(y.a.date) || itemOrderKey(x.a.item) - itemOrderKey(y.a.item));
 
   const history = await getStudentStatuses(student.id);
@@ -418,7 +423,9 @@ async function renderChildPage() {
       <span class="item-name">${itemNameHtml(a)}${dateNote}</span>
       <span class="item-status">${childLabel(eff)}</span>
     </li>`;
-  }).join('') : `<li class="empty-row">${rubyHtml('今日', 'きょう')}はありません</li>`;
+  }).join('') : (state.solo && allAssignmentCount === 0
+    ? `<li class="empty-row">${rubyHtml('先生', 'せんせい')}の${rubyHtml('課題', 'かだい')}が、まだ${rubyHtml('届', 'とど')}いていません。すこし${rubyHtml('待', 'ま')}って、${rubyHtml('下', 'した')}の「${rubyHtml('更新', 'こうしん')}」を${rubyHtml('押', 'お')}してね。</li>`
+    : `<li class="empty-row">${rubyHtml('今日', 'きょう')}はありません</li>`);
   const bulkButtonHtml = hasUntouched
     ? `<button class="mini-btn primary" data-action="markAllSubmitted" style="margin-bottom:10px;">${rubyHtml('全部', 'ぜんぶ')}${rubyHtml('出', 'だ')}せた</button>`
     : '';
@@ -468,7 +475,9 @@ async function renderChildPage() {
       ${state.solo ? (() => {
         const ss = Sync.getSyncState();
         const note = ss.connected ? 'つながっています' : (ss.error ? `つながっていません（${escapeHtml(ss.error)}）` : 'つなげています…');
-        return `<p class="sync-note">${rubyHtml('先生', 'せんせい')}との${rubyHtml('同期', 'どうき')}：${note}</p><button class="teacher-link" data-action="goTeacherPin">教師用</button>`;
+        return `<p class="sync-note">${rubyHtml('先生', 'せんせい')}との${rubyHtml('同期', 'どうき')}：${note}　<button class="mini-btn" data-action="refreshSync" type="button">${rubyHtml('更新', 'こうしん')}</button></p>
+        <p class="sync-note">${rubyHtml('受', 'う')}け${rubyHtml('取', 'と')}った${rubyHtml('課題', 'かだい')}：${rubyHtml('今日', 'きょう')} ${todayAssignmentCount}${rubyHtml('件', 'けん')}／ぜんぶ ${allAssignmentCount}${rubyHtml('件', 'けん')}</p>
+        <button class="teacher-link" data-action="goTeacherPin">教師用</button>`;
       })() : ''}
 
       <button class="finish-btn" data-action="finishChild">${rubyHtml('登録', 'とうろく')}する</button>
@@ -2593,6 +2602,14 @@ async function handleAction(action, ds) {
     case 'alreadyDone':
       showToast('先生が決めたものだよ');
       return;
+    case 'refreshSync':
+      showToast('更新しています…');
+      if (await Sync.isSyncEnabled()) await Sync.startSync();
+      render();
+      return;
+    case 'scanChildSetup':
+      await openQrScanner(handleScannedChildSetup, '設定用QRコードを読み取る');
+      return;
     case 'openCorrectSheet':
       await openCorrectSheet(Number(ds.assignment));
       return;
@@ -2958,6 +2975,19 @@ async function main() {
 
     // 先生の端末では、起動したときに、まだクラウドに無い提出物や登録を自動で送っておく（児童の端末に届くように）。
     if (!state.solo) Sync.autoPush();
+
+    // お気に入り・ホーム画面から開き直したときや、しばらく閉じていた画面に戻ったときは、同期をつなぎ直して最新の状態にする。
+    // （バックグラウンドに回っている間に、同期の接続が切れていることがあるため。日付がかわった場合の表示更新も兼ねる）
+    let hiddenAt = Date.now();
+    const onResume = async () => {
+      if (document.visibilityState === 'hidden') { hiddenAt = Date.now(); return; }
+      if (Date.now() - hiddenAt < 30000) return;
+      hiddenAt = Date.now();
+      if (await Sync.isSyncEnabled()) Sync.startSync();
+      if (state.screen === 'childPage' || state.screen === 'childSelect') render();
+    };
+    document.addEventListener('visibilitychange', onResume);
+    window.addEventListener('pageshow', (e) => { if (e.persisted) { hiddenAt = 0; onResume(); } });
 
     // 児童用QRコード（URL）から開かれたときは、自動でその児童専用にする。
     // URLは消さずに残しておく（ホーム画面に追加したときも、同じ設定が引き継がれるように）。
