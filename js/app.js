@@ -474,9 +474,14 @@ async function renderChildPage() {
 
       ${state.solo ? (() => {
         const ss = Sync.getSyncState();
-        const note = ss.connected ? 'つながっています' : (ss.error ? `つながっていません（${escapeHtml(ss.error)}）` : 'つなげています…');
+        const waited = Date.now() - (ss.startedAt || Date.now());
+        const note = ss.serverConnected ? 'つながっています'
+          : ss.error ? `つながっていません（${escapeHtml(ss.error)}）`
+          : waited > 8000 ? 'つながっていません（クラウドと通信できていません。ネットワークやフィルターの設定を、先生に確認してもらってください）'
+          : 'つなげています…';
+        const roomTail = ss.classroomId ? ss.classroomId.slice(-4) : '－';
         return `<p class="sync-note">${rubyHtml('先生', 'せんせい')}との${rubyHtml('同期', 'どうき')}：${note}　<button class="mini-btn" data-action="refreshSync" type="button">${rubyHtml('更新', 'こうしん')}</button></p>
-        <p class="sync-note">${rubyHtml('受', 'う')}け${rubyHtml('取', 'と')}った${rubyHtml('課題', 'かだい')}：${rubyHtml('今日', 'きょう')} ${todayAssignmentCount}${rubyHtml('件', 'けん')}／ぜんぶ ${allAssignmentCount}${rubyHtml('件', 'けん')}</p>
+        <p class="sync-note">${rubyHtml('受', 'う')}け${rubyHtml('取', 'と')}った${rubyHtml('課題', 'かだい')}：${rubyHtml('今日', 'きょう')} ${todayAssignmentCount}${rubyHtml('件', 'けん')}／ぜんぶ ${allAssignmentCount}${rubyHtml('件', 'けん')}　（${rubyHtml('学級', 'がっきゅう')}コード ${escapeHtml(roomTail)}）</p>
         <button class="teacher-link" data-action="goTeacherPin">教師用</button>`;
       })() : ''}
 
@@ -1746,7 +1751,7 @@ async function renderTeacherSettings() {
         <h2>クラウド同期（複数端末をリアルタイムで揃える）</h2>
         <p style="color:#666;font-size:0.9rem;">児童の氏名・ふりがなは送信されません。送られるのはランダムなコードと、提出物・提出状況・先生のコメントのみです（コメントに児童の氏名は書かないでください）。同期コードは合言葉のようなものなので、他人に教えないでください。</p>
         ${classroomId ? `
-          <p>同期コード：<strong style="font-family:monospace;font-size:1.1rem;">${escapeHtml(classroomId)}</strong>　<button class="mini-btn" id="copyClassroomIdBtn" type="button">コピー</button>　${syncState.connected ? '<span style="color:var(--ok);">● 接続中</span>' : '<span style="color:var(--muted);">○ 未接続</span>'}</p>
+          <p>同期コード：<strong style="font-family:monospace;font-size:1.1rem;">${escapeHtml(classroomId)}</strong>　<button class="mini-btn" id="copyClassroomIdBtn" type="button">コピー</button>　${syncState.serverConnected ? '<span style="color:var(--ok);">● 接続中</span>' : '<span style="color:var(--muted);">○ 未接続</span>'}</p>
           <p style="color:#666;font-size:0.85rem;">他の端末では、名簿画面で先に「名簿（コード付き）」を取り込んでから、この同期コードを入力するか、QRコードを読み取って参加してください。</p>
           <button class="mini-btn" id="showQrBtn">QRコードを表示</button>
           <button class="mini-btn danger" id="leaveSyncBtn">同期をやめる</button>

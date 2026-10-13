@@ -46,9 +46,22 @@ function ensureFirebase() {
           import(APP_SDK), import(FS_SDK), import(AUTH_SDK),
         ]);
         const app = initializeApp(firebaseConfig);
-        dbFs = fsMod.initializeFirestore(app, {
-          localCache: fsMod.persistentLocalCache({ tabManager: fsMod.persistentSingleTabManager() }),
-        });
+        // 学校のネットワークでは、フィルターやプロキシが通常の通信方式を止めることがあるため、
+        // つながらないときは自動で別の方式（ロングポーリング）に切り替える。
+        // 端末内の保存が使えない・別のタブが使っているときは、保存なしでも動くようにする。
+        try {
+          dbFs = fsMod.initializeFirestore(app, {
+            localCache: fsMod.persistentLocalCache({ tabManager: fsMod.persistentMultipleTabManager() }),
+            experimentalAutoDetectLongPolling: true,
+          });
+        } catch (err) {
+          console.warn('persistent cache unavailable, using memory cache', err);
+          try {
+            dbFs = fsMod.initializeFirestore(app, { localCache: fsMod.memoryLocalCache(), experimentalAutoDetectLongPolling: true });
+          } catch (err2) {
+            dbFs = fsMod.getFirestore(app);
+          }
+        }
         fsApi = fsMod;
         authObj = authMod.getAuth(app);
       }
@@ -192,7 +205,7 @@ export async function startSync() {
   try {
     await ensureFirebase();
   } catch (err) {
-    status = { enabled: true, connected: false, error: err.message, classroomId };
+    status = { enabled: true, connected: false, serverConnected: false, error: err.message, classroomId, startedAt: Date.now() };
     notify();
     return;
   }
@@ -200,8 +213,25 @@ export async function startSync() {
   const { collection, onSnapshot } = fsApi;
   const base = ['classes', classroomId];
   const onErr = (err) => { status.error = err.message; notify(); };
+  // 「受信を始めた」ことと、「実際にクラウドと通信できた」ことは別。後者は、クラウドから直接届いた時点で true にする。
+  status = { enabled: true, connected: true, serverConnected: false, error: null, classroomId, startedAt: Date.now() };
+  notify();
+  setTimeout(notify, 8000); // 8秒たってもつながらなければ、画面の表示を「つながっていません」に切り替えるため
 
-  unsubs.push(onSnapshot(collection(dbFs, ...base, 'items'), async (snap) => {
+  // 受信した内容は、届いた順に1つずつ処理する（同時に処理すると、同じものが二重に保存されることがあるため）。
+  let chain = Promise.resolve();
+  const listen = (name, handler) => {
+    unsubs.push(onSnapshot(collection(dbFs, ...base, name), { includeMetadataChanges: true }, (snap) => {
+      status.serverConnected = !snap.metadata.fromCache;
+      if (!snap.metadata.fromCache) status.error = null;
+      chain = chain.then(async () => {
+        if (snap.docChanges().length) await handler(snap);
+        notify();
+      }).catch((err) => console.error('sync handler failed', name, err));
+    }, onErr));
+  };
+
+  listen('items', async (snap) => {
     for (const change of snap.docChanges()) {
       const syncId = change.doc.id;
       const existingId = await localItemIdBySyncId(syncId);
@@ -217,10 +247,9 @@ export async function startSync() {
       }
     }
     await reconcilePending();
-    notify();
-  }, onErr));
+  });
 
-  unsubs.push(onSnapshot(collection(dbFs, ...base, 'assignments'), async (snap) => {
+  listen('assignments', async (snap) => {
     for (const change of snap.docChanges()) {
       const syncId = change.doc.id;
       const existingId = await localAssignmentIdBySyncId(syncId);
@@ -239,10 +268,9 @@ export async function startSync() {
       else await DB.add('assignments', row);
     }
     await reconcilePending();
-    notify();
-  }, onErr));
+  });
 
-  unsubs.push(onSnapshot(collection(dbFs, ...base, 'statuses'), async (snap) => {
+  listen('statuses', async (snap) => {
     for (const change of snap.docChanges()) {
       const data = change.doc.data();
       const localStudentId = await localStudentIdByCode(data.studentCode);
@@ -263,10 +291,9 @@ export async function startSync() {
       if (data.comment) row.comment = data.comment;
       await DB.put('statuses', row);
     }
-    notify();
-  }, onErr));
+  });
 
-  unsubs.push(onSnapshot(collection(dbFs, ...base, 'history'), async (snap) => {
+  listen('history', async (snap) => {
     for (const change of snap.docChanges()) {
       if (change.type === 'removed') {
         const existing = await DB.getAllByIndex('history', 'fsId', change.doc.id);
@@ -287,11 +314,7 @@ export async function startSync() {
       if (existing.length) await DB.put('history', { ...existing[0], ...row });
       else await DB.add('history', row);
     }
-    notify();
-  }, onErr));
-
-  status = { enabled: true, connected: true, error: null, classroomId };
-  notify();
+  });
 }
 
 // ---------- push (この端末での変更 → クラウド) ----------
